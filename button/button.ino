@@ -1,28 +1,30 @@
 #include <esp_now.h>
 #include <WiFi.h>
+// #include "secret.h" // Commented out as requested
 
 // Button configuration
-#define BUTTON_PIN 15        // Button input pin
-#define LED_PIN 2            // Built-in LED control pin (for boost converter enable)
-#define BOOST_EN_PIN 4       // Boost converter enable pin
+#define BUTTON_PIN 15        // Button input pin
+#define LED_PIN 2            // Built-in LED control pin (for boost converter enable)
+#define BOOST_EN_PIN 4       // Boost converter enable pin
 
-// Base station MAC address - UPDATE THIS WITH YOUR BASE STATION'S MAC!
-// Get this from base station's Serial Monitor output
-// Format: Copy from "AA:BB:CC:DD:EE:FF" to {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}
-uint8_t baseStationMAC[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+// Base station MAC address
+// Example Mac: 40:4c:ca:57:97:f0
+uint8_t baseStationMAC[] = {0x40, 0x4c, 0xca, 0x57, 0x97, 0xf0}; // ACTIVE MAC for testing
+// uint8_t baseStationMAC[] = BASE_STATION_MAC; // UNUSED
 
-// Button state
-volatile bool buttonPressed = false;
 bool ledState = false;
 unsigned long lastPressTime = 0;
 const unsigned long debounceDelay = 50;
 
+// FIX: Declare the flag used in the Interrupt Service Routine (ISR)
+volatile bool buttonPressed = false; 
+
 // Game state
 enum ButtonState {
-  WAITING,      // Waiting for game to start
-  READY,        // Game active, ready to buzz
-  WINNER,       // This button buzzed first
-  LOCKED_OUT    // Another button buzzed first
+  WAITING,      // Waiting for game to start
+  READY,        // Game active, ready to buzz
+  WINNER,       // This button buzzed first
+  LOCKED_OUT    // Another button buzzed first
 };
 
 ButtonState currentState = WAITING;
@@ -57,7 +59,8 @@ void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData,
   }
 }
 
-void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
+// FIXED: Updated callback signature for ESP32 Arduino Core 3.x
+void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
   Serial.print("Send Status: ");
   Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
 }
@@ -160,6 +163,7 @@ void loop() {
       }
     }
     
+    // Reset the flag
     buttonPressed = false;
   }
   
@@ -167,10 +171,15 @@ void loop() {
   delay(10);
 }
 
-// Optional: Add deep sleep for power saving when not in use
+// FIXED: Deep sleep function for ESP32-C6
+// Note: ESP32-C6 uses GPIO wakeup instead of ext0
 void enterDeepSleep() {
   Serial.println("Entering deep sleep...");
   setLED(false);
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, HIGH);
+  
+  // Configure GPIO wakeup (ESP32-C6 compatible)
+  esp_sleep_enable_gpio_wakeup();
+  gpio_wakeup_enable((gpio_num_t)BUTTON_PIN, GPIO_INTR_HIGH_LEVEL);
+  
   esp_deep_sleep_start();
 }

@@ -55,14 +55,33 @@ A professional quiz buzzer system built with ESP32-C6 microcontrollers, featurin
 esp32-quiz-buzzer/
 ├── base-station/           # Base station code
 │   ├── base-station.ino
+│   ├── secret.h
 │   └── README.md
 ├── button/                 # Button unit code
 │   ├── button.ino
+│   ├── secret.h
 │   └── README.md
 ├── wiring-diagrams/        # Detailed wiring guides
 │   └── diagrams.md
 ├── LICENSE
 └── README.md              # This file
+```
+
+## secret.h
+
+This file contains sensitive information, such as WiFi credentials and MAC addresses. It should not be committed to version control.
+
+You will need to create 2 files called `secret.h` and `secret.h` in the `base-station` and `button` directories, respectively. These files should contain the following lines:
+
+### base-station/secret.h
+```cpp
+#define WIFI_SSID "QuizBuzzer-Setup"
+#define WIFI_PASSWORD "buzzer123"
+```
+
+### button/secret.h
+```cpp
+#define BASE_STATION_MAC {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 ```
 
 ## 🚀 Quick Start

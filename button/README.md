@@ -239,6 +239,11 @@ Flip toggle switch to OFF when not in use to conserve battery.
 
 ## 📝 Customization
 
+### button/secret.h
+```cpp
+#define BASE_STATION_MAC {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+```
+
 ### Implement Deep Sleep for Battery Life
 
 Add to end of `loop()`:

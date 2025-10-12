@@ -62,6 +62,12 @@ USB 5V → ESP32 USB-C Port
 
 ## 📚 Required Arduino Libraries
 
+### base-station/secret.h
+```cpp
+#define WIFI_SSID "QuizBuzzer-Setup"
+#define WIFI_PASSWORD "buzzer123"
+```
+
 Install these libraries via Arduino IDE Library Manager:
 
 1. **ESP32 Board Support**

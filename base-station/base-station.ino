@@ -7,6 +7,7 @@
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
+#include "secret.h" // Contains SSID and PASSWORD definitions
 
 // OLED Display settings
 #define SCREEN_WIDTH 128
@@ -25,8 +26,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define NUM_LEDS 60
 
 // Access Point credentials - Change these for your setup
-const char* ap_ssid = "QuizBuzzer-Setup";
-const char* ap_password = "buzzer123";
+const char* ap_ssid = WIFI_SSID;
+const char* ap_password = WIFI_PASSWORD;
 
 // Web server
 WebServer server(80);
