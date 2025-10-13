@@ -7,7 +7,7 @@
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
-#include "base-secret.h" // Contains WIFI_SSID and WIFI_PASSWORD definitions
+#include "base-secret.h"
 
 // OLED Display settings
 #define SCREEN_WIDTH 128
@@ -25,9 +25,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define LED_PIN 4
 #define NUM_LEDS 60
 
-// Access Point credentials from secret.h
-const char* ap_ssid = WIFI_SSID;
-const char* ap_password = WIFI_PASSWORD;
+// Access Point credentials - use String objects to ensure proper initialization
+String ssid_str = String(WIFI_SSID);
+String password_str = String(WIFI_PASSWORD);
 
 // Web server
 WebServer server(80);
@@ -132,7 +132,7 @@ void updateDisplay() {
     display.println();
     
     display.print("WiFi: ");
-    display.println(ap_ssid);
+    display.println(ssid_str);
     display.print("IP: ");
     display.println(WiFi.softAPIP());
     display.println();
@@ -489,45 +489,108 @@ void setup() {
   Serial.println(WIFI_SSID);
   Serial.print("WIFI_PASSWORD defined as: ");
   Serial.println(WIFI_PASSWORD);
-  Serial.print("ap_ssid variable: ");
-  Serial.println(ap_ssid);
-  Serial.print("ap_password variable: ");
-  Serial.println(ap_password);
+  Serial.print("ssid_str variable: ");
+  Serial.println(ssid_str);
+  Serial.print("password_str variable: ");
+  Serial.println(password_str);
   Serial.println("----------------------");
   
   // Initialize I2C with ESP32-C6 pins
+  Serial.println("\n--- Initializing I2C and Display ---");
   Wire.begin(6, 7);
+  Serial.println("I2C initialized (SDA=GPIO6, SCL=GPIO7)");
   
   // Initialize display
+  Serial.println("Attempting to initialize OLED display...");
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED initialization failed!");
-    while (1);
-  }
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Initializing...");
-  display.display();
-  
-  // Initialize SD card
-  if (!SD.begin(SD_CS)) {
-    Serial.println("SD Card failed - configuration will not persist");
+    Serial.println("WARNING: OLED initialization failed!");
+    Serial.println("Display will not work, but system will continue");
+    // Don't halt - continue without display
   } else {
-    Serial.println("SD Card initialized");
+    Serial.println("OLED display initialized successfully");
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Initializing...");
+    display.display();
+  }
+  Serial.println("---------------------------------------");
+  
+  // Initialize SD card with detailed debugging
+  Serial.println("\n--- SD Card Initialization ---");
+  Serial.print("CS Pin: GPIO");
+  Serial.println(SD_CS);
+  Serial.print("MOSI Pin: GPIO");
+  Serial.println(SD_MOSI);
+  Serial.print("MISO Pin: GPIO");
+  Serial.println(SD_MISO);
+  Serial.print("SCK Pin: GPIO");
+  Serial.println(SD_SCK);
+  
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  
+  if (!SD.begin(SD_CS)) {
+    Serial.println("ERROR: SD Card failed to initialize");
+    Serial.println("Possible causes:");
+    Serial.println("  - Card not inserted");
+    Serial.println("  - Card not formatted as FAT32");
+    Serial.println("  - Incorrect wiring");
+    Serial.println("  - Bad SD card module");
+    Serial.println("Configuration will not persist!");
+  } else {
+    Serial.println("SUCCESS: SD Card initialized");
+    
+    // Test SD card functionality
+    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+    Serial.print("SD Card Size: ");
+    Serial.print(cardSize);
+    Serial.println(" MB");
+    
+    uint64_t usedBytes = SD.usedBytes() / (1024 * 1024);
+    Serial.print("Used Space: ");
+    Serial.print(usedBytes);
+    Serial.println(" MB");
+    
     loadConfig();
   }
+  Serial.println("------------------------------");
   
   // Set up WiFi
+  Serial.println("\n--- Setting up WiFi Access Point ---");
+  Serial.print("About to call WiFi.softAP with SSID: '");
+  Serial.print(ssid_str);
+  Serial.print("' (length: ");
+  Serial.print(ssid_str.length());
+  Serial.println(")");
+  Serial.print("Password: '");
+  Serial.print(password_str);
+  Serial.print("' (length: ");
+  Serial.print(password_str.length());
+  Serial.println(")");
+  Serial.print("SSID c_str(): '");
+  Serial.print(ssid_str.c_str());
+  Serial.println("'");
+  
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(ap_ssid, ap_password);
+  
+  bool apResult = WiFi.softAP(ssid_str.c_str(), password_str.c_str());
+  
+  Serial.print("WiFi.softAP returned: ");
+  Serial.println(apResult ? "SUCCESS" : "FAILED");
+  
+  delay(1000); // Give WiFi time to start
+  
+  Serial.print("Actual broadcasting SSID: ");
+  Serial.println(WiFi.softAPSSID());
+  Serial.println("--------------------------------------");
   
   // Print WiFi details
   Serial.println("\n--- WiFi Configuration ---");
   Serial.print("SSID: ");
-  Serial.println(ap_ssid);
+  Serial.println(ssid_str);
   Serial.print("Password: ");
-  Serial.println(ap_password);
+  Serial.println(password_str);
   Serial.print("IP Address: ");
   Serial.println(WiFi.softAPIP());
   Serial.println("-------------------------");
@@ -554,14 +617,23 @@ void setup() {
   server.begin();
   
   Serial.println("Web server started at http://192.168.4.1");
-  Serial.println("WiFi SSID: " + String(ap_ssid));
-  Serial.println("WiFi Password: " + String(ap_password));
+  Serial.println("WiFi SSID: " + ssid_str);
+  Serial.println("WiFi Password: " + password_str);
   
   updateDisplay();
   Serial.println("\nBase Station Ready!");
 }
 
 void loop() {
+  // Debug output every 5 seconds to prove new code is running
+  static unsigned long lastDebug = 0;
+  if (millis() - lastDebug > 5000) {
+    Serial.println(">>> LOOP ACTIVE - CODE VERSION 3.0 <<<");
+    Serial.print("Broadcasting SSID: ");
+    Serial.println(ssid_str);
+    lastDebug = millis();
+  }
+  
   server.handleClient();
   delay(10);
 }
