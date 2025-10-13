@@ -7,7 +7,7 @@
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
-#include "secret.h" // Contains SSID and PASSWORD definitions
+#include "base-secret.h" // Contains WIFI_SSID and WIFI_PASSWORD definitions
 
 // OLED Display settings
 #define SCREEN_WIDTH 128
@@ -25,7 +25,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define LED_PIN 4
 #define NUM_LEDS 60
 
-// Access Point credentials - Change these for your setup
+// Access Point credentials from secret.h
 const char* ap_ssid = WIFI_SSID;
 const char* ap_password = WIFI_PASSWORD;
 
@@ -44,12 +44,28 @@ int numTeams = 4;
 bool gameActive = false;
 int firstBuzzer = -1;
 unsigned long buzzerTime = 0;
-bool configLoaded = false; // Track if config was loaded from SD
+bool configLoaded = false;
+
+// Helper function to parse MAC address from string
+bool parseMACAddress(const String &macStr, uint8_t *mac) {
+  int values[6];
+  int count = sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x", 
+                     &values[0], &values[1], &values[2], 
+                     &values[3], &values[4], &values[5]);
+  
+  if (count == 6) {
+    for (int i = 0; i < 6; i++) {
+      mac[i] = (uint8_t)values[i];
+    }
+    return true;
+  }
+  return false;
+}
 
 // ESP-NOW callback - receives button presses (ESP32-C6 compatible)
 void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
   if (!gameActive || firstBuzzer != -1) {
-    return; // Game not active or someone already buzzed
+    return;
   }
   
   const uint8_t *mac = recv_info->src_addr;
@@ -110,7 +126,6 @@ void updateDisplay() {
     display.setCursor(0, 0);
     display.println("Quiz Buzzer System");
     
-    // Show config status
     if (configLoaded) {
       display.println("[Config Loaded]");
     }
@@ -122,12 +137,10 @@ void updateDisplay() {
     display.println(WiFi.softAPIP());
     display.println();
     
-    // Show team names from config
     display.print("Teams (");
     display.print(numTeams);
     display.println("):");
     
-    // Display up to 3 team names on screen
     for (int i = 0; i < min(numTeams, 3); i++) {
       display.print(i + 1);
       display.print(". ");
@@ -154,50 +167,93 @@ void updateDisplay() {
   display.display();
 }
 
-// Web interface HTML
+// Web interface HTML with MAC address inputs
 String getHTML() {
   String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>body{font-family:Arial;margin:20px;}";
-  html += "input,select,button{padding:10px;margin:5px;font-size:16px;}";
-  html += ".team{border:1px solid #ccc;padding:10px;margin:10px 0;}";
-  html += "button{background:#4CAF50;color:white;border:none;cursor:pointer;}";
-  html += "button:hover{background:#45a049;}</style></head><body>";
+  html += "<style>";
+  html += "body{font-family:Arial;margin:20px;background:#f0f0f0;}";
+  html += ".container{max-width:800px;margin:0 auto;background:white;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);}";
+  html += "h1{color:#333;border-bottom:2px solid #4CAF50;padding-bottom:10px;}";
+  html += "h2{color:#555;margin-top:30px;}";
+  html += "input,select,button{padding:10px;margin:5px;font-size:16px;border:1px solid #ddd;border-radius:4px;}";
+  html += "input[type='text']{width:200px;}";
+  html += ".team{border:1px solid #ddd;padding:15px;margin:10px 0;background:#f9f9f9;border-radius:4px;}";
+  html += ".team label{display:inline-block;width:120px;font-weight:bold;}";
+  html += "button{background:#4CAF50;color:white;border:none;cursor:pointer;font-weight:bold;}";
+  html += "button:hover{background:#45a049;}";
+  html += ".status{padding:10px;background:#e3f2fd;border-left:4px solid #2196F3;margin:10px 0;}";
+  html += ".controls{margin:20px 0;}";
+  html += ".controls button{margin-right:10px;}";
+  html += ".mac-input{font-family:monospace;}";
+  html += ".help{font-size:12px;color:#666;font-style:italic;}";
+  html += "</style></head><body>";
+  html += "<div class='container'>";
   html += "<h1>Quiz Buzzer Setup</h1>";
   
-  html += "<h2>Game Controls</h2>";
-  html += "<button onclick=\"fetch('/start')\">START GAME</button>";
-  html += "<button onclick=\"fetch('/reset')\">RESET ROUND</button>";
-  html += "<button onclick=\"fetch('/stop')\">STOP GAME</button>";
+  // Status section
+  html += "<div class='status'>";
+  html += "<strong>Status:</strong> Game is " + String(gameActive ? "<span style='color:green'>ACTIVE</span>" : "<span style='color:red'>STOPPED</span>");
+  if (firstBuzzer != -1) {
+    html += " | First Buzzer: <strong>" + teams[firstBuzzer].name + "</strong>";
+  }
+  html += "</div>";
   
+  // Game controls
+  html += "<h2>Game Controls</h2>";
+  html += "<div class='controls'>";
+  html += "<button onclick=\"fetch('/start').then(()=>location.reload())\">START GAME</button>";
+  html += "<button onclick=\"fetch('/reset').then(()=>location.reload())\">RESET ROUND</button>";
+  html += "<button onclick=\"fetch('/stop').then(()=>location.reload())\">STOP GAME</button>";
+  html += "</div>";
+  
+  // Team configuration form
   html += "<h2>Team Configuration</h2>";
   html += "<form action='/config' method='POST'>";
-  html += "Number of Teams: <select name='numteams'>";
+  
+  html += "<div style='margin-bottom:20px;'>";
+  html += "<label for='numteams'><strong>Number of Teams:</strong></label> ";
+  html += "<select name='numteams' id='numteams'>";
   for (int i = 1; i <= 9; i++) {
     html += "<option value='" + String(i) + "'";
     if (i == numTeams) html += " selected";
     html += ">" + String(i) + "</option>";
   }
-  html += "</select><br>";
+  html += "</select>";
+  html += "</div>";
   
+  // Team entries
   for (int i = 0; i < 9; i++) {
     html += "<div class='team'>";
-    html += "Team " + String(i + 1) + ": ";
-    html += "<input type='text' name='team" + String(i) + "' value='" + teams[i].name + "'>";
-    html += " MAC: " + macToString(teams[i].buttonMAC);
+    html += "<h3 style='margin-top:0;'>Team " + String(i + 1) + "</h3>";
+    
+    html += "<div style='margin-bottom:10px;'>";
+    html += "<label>Name:</label>";
+    html += "<input type='text' name='team" + String(i) + "' value='" + teams[i].name + "' placeholder='Team Name'>";
+    html += "</div>";
+    
+    html += "<div>";
+    html += "<label>MAC Address:</label>";
+    html += "<input type='text' name='mac" + String(i) + "' value='" + macToString(teams[i].buttonMAC) + "' ";
+    html += "class='mac-input' placeholder='AA:BB:CC:DD:EE:FF' pattern='[A-Fa-f0-9:]+' title='Format: AA:BB:CC:DD:EE:FF'>";
+    html += "<br><span class='help'>Format: AA:BB:CC:DD:EE:FF (get from button's Serial Monitor)</span>";
+    html += "</div>";
+    
     html += "</div>";
   }
   
-  html += "<button type='submit'>Save Configuration</button>";
+  html += "<button type='submit' style='font-size:18px;padding:15px 30px;margin-top:20px;'>Save Configuration</button>";
   html += "</form>";
   
-  html += "<h2>Status</h2>";
-  html += "<p>Game Active: " + String(gameActive ? "YES" : "NO") + "</p>";
-  if (firstBuzzer != -1) {
-    html += "<p>First Buzzer: " + teams[firstBuzzer].name + "</p>";
-  }
+  // Base station MAC info
+  html += "<h2>Base Station Info</h2>";
+  html += "<div class='status'>";
+  html += "<strong>Base Station MAC:</strong> <code style='font-size:16px;'>" + WiFi.macAddress() + "</code><br>";
+  html += "<span class='help'>Copy this MAC address into your button code (baseStationMAC array)</span>";
+  html += "</div>";
   
-  html += "<script>setInterval(()=>location.reload(),5000);</script>";
+  html += "</div>"; // container
   html += "</body></html>";
   
   return html;
@@ -215,18 +271,35 @@ void handleRoot() {
 }
 
 void handleConfig() {
+  // Update number of teams
   if (server.hasArg("numteams")) {
     numTeams = server.arg("numteams").toInt();
   }
   
+  // Update team names and MAC addresses
   for (int i = 0; i < 9; i++) {
     if (server.hasArg("team" + String(i))) {
       teams[i].name = server.arg("team" + String(i));
       teams[i].active = (i < numTeams);
     }
+    
+    // Parse MAC address
+    if (server.hasArg("mac" + String(i))) {
+      String macStr = server.arg("mac" + String(i));
+      if (macStr.length() > 0) {
+        if (parseMACAddress(macStr, teams[i].buttonMAC)) {
+          Serial.println("Updated MAC for " + teams[i].name + ": " + macStr);
+        } else {
+          Serial.println("Failed to parse MAC for " + teams[i].name + ": " + macStr);
+        }
+      }
+    }
   }
   
   saveConfig();
+  updateDisplay();
+  
+  // Redirect back to main page
   server.sendHeader("Location", "/");
   server.send(303);
 }
@@ -235,6 +308,15 @@ void handleStart() {
   gameActive = true;
   firstBuzzer = -1;
   updateDisplay();
+  
+  // Send ready signal to all buttons
+  for (int i = 0; i < numTeams; i++) {
+    if (teams[i].active) {
+      uint8_t readyData = 2;
+      esp_now_send(teams[i].buttonMAC, &readyData, sizeof(readyData));
+    }
+  }
+  
   server.send(200, "text/plain", "Game Started");
 }
 
@@ -261,30 +343,87 @@ void handleStop() {
 }
 
 void saveConfig() {
-  if (!SD.begin(SD_CS)) return;
+  Serial.println("\n--- Attempting to save configuration ---");
+  
+  if (!SD.begin(SD_CS)) {
+    Serial.println("ERROR: SD Card failed - config not saved");
+    return;
+  }
+  
+  Serial.println("SD Card available, opening config.txt for writing...");
   
   File configFile = SD.open("/config.txt", FILE_WRITE);
   if (configFile) {
+    Serial.println("Config file opened for writing");
+    Serial.print("Saving number of teams: ");
+    Serial.println(numTeams);
+    
     configFile.println(numTeams);
     for (int i = 0; i < 9; i++) {
+      Serial.print("Saving Team ");
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(teams[i].name);
+      Serial.print(" - MAC: ");
+      
       configFile.println(teams[i].name);
       for (int j = 0; j < 6; j++) {
         configFile.print(teams[i].buttonMAC[j]);
-        if (j < 5) configFile.print(",");
+        Serial.print(teams[i].buttonMAC[j], HEX);
+        if (j < 5) {
+          configFile.print(",");
+          Serial.print(":");
+        }
       }
       configFile.println();
+      Serial.println();
     }
     configFile.close();
+    Serial.println("Configuration saved successfully to SD card");
+  } else {
+    Serial.println("ERROR: Failed to open config.txt for writing");
   }
+  Serial.println("---------------------------------------\n");
 }
 
 void loadConfig() {
-  if (!SD.begin(SD_CS)) return;
+  Serial.println("\n--- Attempting to load configuration ---");
+  
+  if (!SD.begin(SD_CS)) {
+    Serial.println("ERROR: SD Card not available or failed to initialize");
+    Serial.println("Check SD card is inserted and wired correctly");
+    return;
+  }
+  
+  Serial.println("SD Card initialized successfully");
+  
+  if (!SD.exists("/config.txt")) {
+    Serial.println("WARNING: config.txt does not exist on SD card");
+    Serial.println("Using default configuration");
+    // Initialize with default values
+    for (int i = 0; i < 9; i++) {
+      teams[i].name = "Team " + String(i + 1);
+      teams[i].active = (i < numTeams);
+      // Initialize MAC to zeros
+      for (int j = 0; j < 6; j++) {
+        teams[i].buttonMAC[j] = 0;
+      }
+    }
+    configLoaded = false;
+    return;
+  }
+  
+  Serial.println("Found config.txt, attempting to read...");
   
   File configFile = SD.open("/config.txt");
   if (configFile) {
+    Serial.println("Config file opened successfully");
+    
     numTeams = configFile.parseInt();
-    configFile.readStringUntil('\n'); // consume newline
+    Serial.print("Number of teams: ");
+    Serial.println(numTeams);
+    
+    configFile.readStringUntil('\n');
     
     for (int i = 0; i < 9; i++) {
       teams[i].name = configFile.readStringUntil('\n');
@@ -294,31 +433,74 @@ void loadConfig() {
       }
       teams[i].active = (i < numTeams);
       
+      Serial.print("Team ");
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(teams[i].name);
+      Serial.print(" - MAC: ");
+      
       // Read MAC address
       for (int j = 0; j < 6; j++) {
         teams[i].buttonMAC[j] = configFile.parseInt();
-        if (j < 5) configFile.read(); // consume comma
+        Serial.print(teams[i].buttonMAC[j], HEX);
+        if (j < 5) {
+          Serial.print(":");
+          configFile.read();
+        }
       }
-      configFile.readStringUntil('\n'); // consume newline
+      Serial.println();
+      configFile.readStringUntil('\n');
     }
     configFile.close();
-    configLoaded = true; // Set flag that config was loaded
-    Serial.println("Configuration file loaded successfully");
+    configLoaded = true;
+    Serial.println("Configuration loaded successfully!");
   } else {
-    Serial.println("No configuration file found, using defaults");
+    Serial.println("ERROR: Failed to open config.txt for reading");
+    // Initialize with default values
+    for (int i = 0; i < 9; i++) {
+      teams[i].name = "Team " + String(i + 1);
+      teams[i].active = (i < numTeams);
+      for (int j = 0; j < 6; j++) {
+        teams[i].buttonMAC[j] = 0;
+      }
+    }
     configLoaded = false;
   }
+  Serial.println("---------------------------------------\n");
 }
 
 void setup() {
   Serial.begin(115200);
   
+  // Wait for Serial to be ready (ESP32-C6 USB CDC)
+  delay(2000);
+  while (!Serial && millis() < 5000) {
+    delay(10);
+  }
+  
+  // Print base station MAC address
+  Serial.println("\n\n\n=================================");
+  Serial.println("Quiz Buzzer Base Station");
+  Serial.println("=================================");
+  
+  // Debug: Print what we're getting from secret.h
+  Serial.println("\n--- Secret.h Values ---");
+  Serial.print("WIFI_SSID defined as: ");
+  Serial.println(WIFI_SSID);
+  Serial.print("WIFI_PASSWORD defined as: ");
+  Serial.println(WIFI_PASSWORD);
+  Serial.print("ap_ssid variable: ");
+  Serial.println(ap_ssid);
+  Serial.print("ap_password variable: ");
+  Serial.println(ap_password);
+  Serial.println("----------------------");
+  
   // Initialize I2C with ESP32-C6 pins
-  Wire.begin(6, 7); // SDA=GPIO6, SCL=GPIO7 for ESP32-C6
+  Wire.begin(6, 7);
   
   // Initialize display
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED failed");
+    Serial.println("OLED initialization failed!");
     while (1);
   }
   display.clearDisplay();
@@ -332,22 +514,36 @@ void setup() {
   if (!SD.begin(SD_CS)) {
     Serial.println("SD Card failed - configuration will not persist");
   } else {
-    Serial.println("SD Card initialized successfully");
-    // Load previously saved configuration if it exists
+    Serial.println("SD Card initialized");
     loadConfig();
-    Serial.println("Configuration loaded from SD card");
   }
   
-  // Set up Access Point
+  // Set up WiFi
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(ap_ssid, ap_password);
   
+  // Print WiFi details
+  Serial.println("\n--- WiFi Configuration ---");
+  Serial.print("SSID: ");
+  Serial.println(ap_ssid);
+  Serial.print("Password: ");
+  Serial.println(ap_password);
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
+  Serial.println("-------------------------");
+  
+  // Print MAC address for button configuration
+  Serial.println("\nBase Station MAC Address: " + WiFi.macAddress());
+  Serial.println("Copy this into your button code's baseStationMAC array");
+  Serial.println("=================================\n");
+  
   // Initialize ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW failed");
+    Serial.println("ESP-NOW initialization failed!");
     return;
   }
   esp_now_register_recv_cb(onDataRecv);
+  Serial.println("ESP-NOW initialized");
   
   // Set up web server
   server.on("/", handleRoot);
@@ -357,8 +553,12 @@ void setup() {
   server.on("/stop", handleStop);
   server.begin();
   
+  Serial.println("Web server started at http://192.168.4.1");
+  Serial.println("WiFi SSID: " + String(ap_ssid));
+  Serial.println("WiFi Password: " + String(ap_password));
+  
   updateDisplay();
-  Serial.println("Base Station Ready");
+  Serial.println("\nBase Station Ready!");
 }
 
 void loop() {

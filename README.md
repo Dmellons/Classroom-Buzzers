@@ -73,13 +73,13 @@ This file contains sensitive information, such as WiFi credentials and MAC addre
 
 You will need to create 2 files called `secret.h` and `secret.h` in the `base-station` and `button` directories, respectively. These files should contain the following lines:
 
-### base-station/secret.h
+### base-station/base-secret.h
 ```cpp
 #define WIFI_SSID "QuizBuzzer-Setup"
 #define WIFI_PASSWORD "buzzer123"
 ```
 
-### button/secret.h
+### button/button-secret.h
 ```cpp
 #define BASE_STATION_MAC {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 ```

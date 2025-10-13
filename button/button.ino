@@ -1,16 +1,16 @@
 #include <esp_now.h>
 #include <WiFi.h>
-// #include "secret.h" // Commented out as requested
+#include "button-secret.h" // Commented out as requested
 
 // Button configuration
-#define BUTTON_PIN 15        // Button input pin
-#define LED_PIN 2            // Built-in LED control pin (for boost converter enable)
-#define BOOST_EN_PIN 4       // Boost converter enable pin
+#define BUTTON_PIN 15 // Button input pin
+#define LED_PIN 2 // Built-in LED control pin (for boost converter enable)
+#define BOOST_EN_PIN 4 // Boost converter enable pin
 
 // Base station MAC address
 // Example Mac: 40:4c:ca:57:97:f0
-uint8_t baseStationMAC[] = {0x40, 0x4c, 0xca, 0x57, 0x97, 0xf0}; // ACTIVE MAC for testing
-// uint8_t baseStationMAC[] = BASE_STATION_MAC; // UNUSED
+// uint8_t baseStationMAC[] = {0x40, 0x4c, 0xca, 0x57, 0x97, 0xf0}; // ACTIVE MAC for testing
+uint8_t baseStationMAC[] = BASE_STATION_MAC; // UNUSED
 
 bool ledState = false;
 unsigned long lastPressTime = 0;
@@ -21,10 +21,10 @@ volatile bool buttonPressed = false;
 
 // Game state
 enum ButtonState {
-  WAITING,      // Waiting for game to start
-  READY,        // Game active, ready to buzz
-  WINNER,       // This button buzzed first
-  LOCKED_OUT    // Another button buzzed first
+  WAITING, // Waiting for game to start
+  READY, // Game active, ready to buzz
+  WINNER, // This button buzzed first
+  LOCKED_OUT // Another button buzzed first
 };
 
 ButtonState currentState = WAITING;
