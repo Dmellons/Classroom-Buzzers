@@ -344,19 +344,23 @@ void handleStop() {
 
 void saveConfig() {
   Serial.println("\n--- Attempting to save configuration ---");
+  Serial.flush();
   
   if (!SD.begin(SD_CS)) {
     Serial.println("ERROR: SD Card failed - config not saved");
+    Serial.flush();
     return;
   }
   
   Serial.println("SD Card available, opening config.txt for writing...");
+  Serial.flush();
   
   File configFile = SD.open("/config.txt", FILE_WRITE);
   if (configFile) {
     Serial.println("Config file opened for writing");
     Serial.print("Saving number of teams: ");
     Serial.println(numTeams);
+    Serial.flush();
     
     configFile.println(numTeams);
     for (int i = 0; i < 9; i++) {
@@ -380,26 +384,33 @@ void saveConfig() {
     }
     configFile.close();
     Serial.println("Configuration saved successfully to SD card");
+    Serial.flush();
   } else {
     Serial.println("ERROR: Failed to open config.txt for writing");
+    Serial.flush();
   }
   Serial.println("---------------------------------------\n");
+  Serial.flush();
 }
 
 void loadConfig() {
   Serial.println("\n--- Attempting to load configuration ---");
+  Serial.flush();
   
   if (!SD.begin(SD_CS)) {
     Serial.println("ERROR: SD Card not available or failed to initialize");
     Serial.println("Check SD card is inserted and wired correctly");
+    Serial.flush();
     return;
   }
   
   Serial.println("SD Card initialized successfully");
+  Serial.flush();
   
   if (!SD.exists("/config.txt")) {
     Serial.println("WARNING: config.txt does not exist on SD card");
     Serial.println("Using default configuration");
+    Serial.flush();
     // Initialize with default values
     for (int i = 0; i < 9; i++) {
       teams[i].name = "Team " + String(i + 1);
@@ -414,14 +425,17 @@ void loadConfig() {
   }
   
   Serial.println("Found config.txt, attempting to read...");
+  Serial.flush();
   
   File configFile = SD.open("/config.txt");
   if (configFile) {
     Serial.println("Config file opened successfully");
+    Serial.flush();
     
     numTeams = configFile.parseInt();
     Serial.print("Number of teams: ");
     Serial.println(numTeams);
+    Serial.flush();
     
     configFile.readStringUntil('\n');
     
@@ -449,13 +463,16 @@ void loadConfig() {
         }
       }
       Serial.println();
+      Serial.flush();
       configFile.readStringUntil('\n');
     }
     configFile.close();
     configLoaded = true;
     Serial.println("Configuration loaded successfully!");
+    Serial.flush();
   } else {
     Serial.println("ERROR: Failed to open config.txt for reading");
+    Serial.flush();
     // Initialize with default values
     for (int i = 0; i < 9; i++) {
       teams[i].name = "Team " + String(i + 1);
@@ -467,6 +484,7 @@ void loadConfig() {
     configLoaded = false;
   }
   Serial.println("---------------------------------------\n");
+  Serial.flush();
 }
 
 void setup() {
@@ -478,10 +496,10 @@ void setup() {
     delay(10);
   }
   
-  // Print base station MAC address
   Serial.println("\n\n\n=================================");
   Serial.println("Quiz Buzzer Base Station");
-  Serial.println("=================================");
+  Serial.println("================================= V4.0 DEBUG");
+  Serial.flush();
   
   // Debug: Print what we're getting from secret.h
   Serial.println("\n--- Secret.h Values ---");
@@ -494,20 +512,26 @@ void setup() {
   Serial.print("password_str variable: ");
   Serial.println(password_str);
   Serial.println("----------------------");
+  Serial.flush();
   
   // Initialize I2C with ESP32-C6 pins
   Serial.println("\n--- Initializing I2C and Display ---");
+  Serial.flush();
   Wire.begin(6, 7);
   Serial.println("I2C initialized (SDA=GPIO6, SCL=GPIO7)");
+  Serial.flush();
   
   // Initialize display
   Serial.println("Attempting to initialize OLED display...");
+  Serial.flush();
+  
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println("WARNING: OLED initialization failed!");
     Serial.println("Display will not work, but system will continue");
-    // Don't halt - continue without display
+    Serial.flush();
   } else {
     Serial.println("OLED display initialized successfully");
+    Serial.flush();
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
@@ -516,6 +540,12 @@ void setup() {
     display.display();
   }
   Serial.println("---------------------------------------");
+  Serial.flush();
+  
+  // CHECKPOINT 1: SD Card
+  Serial.println("\n*** CHECKPOINT 1: About to initialize SD Card ***");
+  Serial.flush();
+  delay(100);
   
   // Initialize SD card with detailed debugging
   Serial.println("\n--- SD Card Initialization ---");
@@ -527,8 +557,11 @@ void setup() {
   Serial.println(SD_MISO);
   Serial.print("SCK Pin: GPIO");
   Serial.println(SD_SCK);
+  Serial.flush();
   
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  Serial.println("SPI initialized");
+  Serial.flush();
   
   if (!SD.begin(SD_CS)) {
     Serial.println("ERROR: SD Card failed to initialize");
@@ -538,23 +571,37 @@ void setup() {
     Serial.println("  - Incorrect wiring");
     Serial.println("  - Bad SD card module");
     Serial.println("Configuration will not persist!");
+    Serial.flush();
   } else {
     Serial.println("SUCCESS: SD Card initialized");
+    Serial.flush();
     
     // Test SD card functionality
     uint64_t cardSize = SD.cardSize() / (1024 * 1024);
     Serial.print("SD Card Size: ");
     Serial.print(cardSize);
     Serial.println(" MB");
+    Serial.flush();
     
     uint64_t usedBytes = SD.usedBytes() / (1024 * 1024);
     Serial.print("Used Space: ");
     Serial.print(usedBytes);
     Serial.println(" MB");
+    Serial.flush();
     
+    Serial.println("About to call loadConfig()...");
+    Serial.flush();
     loadConfig();
+    Serial.println("loadConfig() completed");
+    Serial.flush();
   }
   Serial.println("------------------------------");
+  Serial.flush();
+  
+  // CHECKPOINT 2: WiFi
+  Serial.println("\n*** CHECKPOINT 2: About to initialize WiFi ***");
+  Serial.flush();
+  delay(100);
   
   // Set up WiFi
   Serial.println("\n--- Setting up WiFi Access Point ---");
@@ -568,69 +615,104 @@ void setup() {
   Serial.print("' (length: ");
   Serial.print(password_str.length());
   Serial.println(")");
-  Serial.print("SSID c_str(): '");
-  Serial.print(ssid_str.c_str());
-  Serial.println("'");
+  Serial.flush();
   
   WiFi.mode(WIFI_AP_STA);
+  Serial.println("WiFi mode set to WIFI_AP_STA");
+  Serial.flush();
   
   bool apResult = WiFi.softAP(ssid_str.c_str(), password_str.c_str());
   
   Serial.print("WiFi.softAP returned: ");
   Serial.println(apResult ? "SUCCESS" : "FAILED");
+  Serial.flush();
   
   delay(1000); // Give WiFi time to start
   
   Serial.print("Actual broadcasting SSID: ");
   Serial.println(WiFi.softAPSSID());
-  Serial.println("--------------------------------------");
-  
-  // Print WiFi details
-  Serial.println("\n--- WiFi Configuration ---");
-  Serial.print("SSID: ");
-  Serial.println(ssid_str);
-  Serial.print("Password: ");
-  Serial.println(password_str);
   Serial.print("IP Address: ");
   Serial.println(WiFi.softAPIP());
-  Serial.println("-------------------------");
+  Serial.println("--------------------------------------");
+  Serial.flush();
   
-  // Print MAC address for button configuration
-  Serial.println("\nBase Station MAC Address: " + WiFi.macAddress());
-  Serial.println("Copy this into your button code's baseStationMAC array");
-  Serial.println("=================================\n");
+  // CHECKPOINT 3: ESP-NOW
+  Serial.println("\n*** CHECKPOINT 3: About to initialize ESP-NOW ***");
+  Serial.flush();
+  delay(100);
   
   // Initialize ESP-NOW
+  Serial.println("Calling esp_now_init()...");
+  Serial.flush();
+  
   if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW initialization failed!");
+    Serial.println("ERROR: ESP-NOW initialization failed!");
+    Serial.flush();
     return;
   }
+  Serial.println("ESP-NOW initialized successfully");
+  Serial.flush();
+  
   esp_now_register_recv_cb(onDataRecv);
-  Serial.println("ESP-NOW initialized");
+  Serial.println("ESP-NOW callback registered");
+  Serial.flush();
+  
+  // CHECKPOINT 4: Web Server
+  Serial.println("\n*** CHECKPOINT 4: About to start Web Server ***");
+  Serial.flush();
+  delay(100);
   
   // Set up web server
+  Serial.println("Registering web server handlers...");
+  Serial.flush();
+  
   server.on("/", handleRoot);
   server.on("/config", HTTP_POST, handleConfig);
   server.on("/start", handleStart);
   server.on("/reset", handleReset);
   server.on("/stop", handleStop);
+  
+  Serial.println("Starting web server...");
+  Serial.flush();
   server.begin();
   
-  Serial.println("Web server started at http://192.168.4.1");
-  Serial.println("WiFi SSID: " + ssid_str);
-  Serial.println("WiFi Password: " + password_str);
+  Serial.println("Web server started successfully");
+  Serial.flush();
+  
+  // CHECKPOINT 5: Update Display
+  Serial.println("\n*** CHECKPOINT 5: About to update display ***");
+  Serial.flush();
+  delay(100);
   
   updateDisplay();
-  Serial.println("\nBase Station Ready!");
+  Serial.println("Display updated");
+  Serial.flush();
+  
+  // Print final status
+  Serial.println("\n=================================");
+  Serial.println("BASE STATION READY!");
+  Serial.println("=================================");
+  Serial.println("\nBase Station MAC Address: " + WiFi.macAddress());
+  Serial.println("Copy this into your button code's baseStationMAC array");
+  Serial.println("\nWeb Interface:");
+  Serial.println("  URL: http://192.168.4.1");
+  Serial.println("  SSID: " + ssid_str);
+  Serial.println("  Password: " + password_str);
+  Serial.println("\n=================================\n");
+  Serial.flush();
 }
 
 void loop() {
-  // Debug output every 5 seconds to prove new code is running
+  // Debug output every 5 seconds to prove loop is running
   static unsigned long lastDebug = 0;
   if (millis() - lastDebug > 5000) {
-    Serial.println(">>> LOOP ACTIVE - CODE VERSION 3.0 <<<");
+    Serial.println(">>> LOOP ACTIVE - CODE VERSION 4.0 <<<");
     Serial.print("Broadcasting SSID: ");
     Serial.println(ssid_str);
+    Serial.print("Uptime: ");
+    Serial.print(millis() / 1000);
+    Serial.println(" seconds");
+    Serial.flush();
     lastDebug = millis();
   }
   
