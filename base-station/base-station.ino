@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <esp_now.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -32,6 +33,8 @@ WebServer server(80);
 // Game state
 bool gameActive = false;
 int winnerTeam = -1;
+unsigned long gameStartTime = 0;
+unsigned long winnerTime = 0;
 
 // Team configuration
 #define MAX_TEAMS 4
@@ -92,19 +95,41 @@ void setup() {
     delay(1000);
   }
   
-  // Start WiFi Access Point
-  WiFi.mode(WIFI_AP);
+  // Start WiFi Access Point with ESP-NOW support
+  WiFi.mode(WIFI_AP_STA);  // Need STA mode for ESP-NOW
   delay(100);
   
   if (WiFi.softAP(ap_ssid, ap_password)) {
     // WiFi started successfully
-    updateDisplay();
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("WiFi OK");
+    display.display();
+    delay(500);
   } else {
     // WiFi failed - show error on display
     display.clearDisplay();
     display.setCursor(0, 0);
     display.println("WiFi Failed!");
     display.display();
+  }
+  
+  // Initialize ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("ESP-NOW Failed!");
+    display.display();
+    delay(2000);
+  } else {
+    // Register callback for receiving data
+    esp_now_register_recv_cb(onDataRecv);
+    
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("ESP-NOW Ready");
+    display.display();
+    delay(500);
   }
   
   // Setup web server
@@ -123,11 +148,78 @@ void setup() {
     digitalWrite(LED_BUILTIN, LOW);
     delay(200);
   }
+  
+  // Show normal interface after initialization
+  updateDisplay();
 }
 
 void loop() {
   server.handleClient();
+  
+  // Check for button timeouts (mark offline if not seen recently)
+  unsigned long currentTime = millis();
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (teams[i].isConfigured && teams[i].isOnline) {
+      if (currentTime - teams[i].lastSeen > 30000) { // 30 second timeout
+        teams[i].isOnline = false;
+      }
+    }
+  }
+  
   delay(2);
+}
+
+// ESP-NOW callback function for receiving button presses
+void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
+  if (len < 1) return;
+  
+  // Find which team this MAC address belongs to
+  int teamIndex = -1;
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (teams[i].isConfigured) {
+      bool macMatch = true;
+      for (int j = 0; j < 6; j++) {
+        if (teams[i].mac[j] != recv_info->src_addr[j]) {
+          macMatch = false;
+          break;
+        }
+      }
+      if (macMatch) {
+        teamIndex = i;
+        teams[i].isOnline = true;
+        teams[i].lastSeen = millis();
+        break;
+      }
+    }
+  }
+  
+  if (teamIndex == -1) return; // Unknown button
+  
+  uint8_t messageType = incomingData[0];
+  
+  if (messageType == 1) { // Button press
+    handleButtonPress(teamIndex);
+  } else if (messageType == 2) { // Heartbeat/status
+    // Just update last seen time (already done above)
+  }
+}
+
+void handleButtonPress(int teamIndex) {
+  if (!gameActive) return; // Game not active
+  if (winnerTeam >= 0) return; // Already have a winner
+  
+  // This team wins!
+  winnerTeam = teamIndex;
+  winnerTime = millis() - gameStartTime;
+  
+  // Log to SD card
+  logBuzzerEvent(teamIndex, winnerTime);
+  
+  // Send responses to all configured buttons
+  sendButtonResponses();
+  
+  // Update display
+  updateDisplay();
 }
 
 void updateDisplay() {
@@ -154,6 +246,8 @@ void updateDisplay() {
       display.setTextSize(2);
       display.println("WINNER:");
       display.println(teams[winnerTeam].name);
+      display.setTextSize(1);
+      display.printf("Time: %lu ms\n", winnerTime);
     } else {
       display.setTextSize(2);
       display.println("READY!");
@@ -161,7 +255,11 @@ void updateDisplay() {
   } else {
     display.println("Teams:");
     for (int i = 0; i < MAX_TEAMS; i++) {
-      display.printf("%d. %s\n", i + 1, teams[i].name.c_str());
+      display.printf("%d. %s", i + 1, teams[i].name.c_str());
+      if (teams[i].isConfigured && teams[i].isOnline) {
+        display.print(" *");
+      }
+      display.println();
     }
   }
   
@@ -183,6 +281,7 @@ void handleRoot() {
   if (gameActive) {
     if (winnerTeam >= 0) {
       html += "<h2 class='winner'>WINNER: " + teams[winnerTeam].name + "!</h2>";
+      html += "<p><strong>Response Time:</strong> " + String(winnerTime) + " ms</p>";
       html += "<button onclick=\"location.href='/reset'\">RESET ROUND</button>";
     } else {
       html += "<h2 class='active'>Game Active - Ready for Buzzes!</h2>";
@@ -193,6 +292,16 @@ void handleRoot() {
     html += "<h2>Game Stopped</h2>";
     html += "<button onclick=\"location.href='/start'\">START GAME</button>";
   }
+  
+  // Add ESP-NOW status
+  html += "<hr><h3>ESP-NOW Status</h3>";
+  html += "<p><strong>Base Station MAC:</strong> " + WiFi.macAddress() + "</p>";
+  html += "<p><strong>Active Connections:</strong> ";
+  int activeCount = 0;
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (teams[i].isConfigured && teams[i].isOnline) activeCount++;
+  }
+  html += String(activeCount) + " / " + String(MAX_TEAMS) + "</p>";
   
   html += "<hr><div class='config'><h3>Team Configuration</h3>";
   html += "<form method='GET' action='/save'>";
@@ -264,6 +373,12 @@ void handleRoot() {
 void handleStart() {
   gameActive = true;
   winnerTeam = -1;
+  gameStartTime = millis();
+  winnerTime = 0;
+  
+  // Send start signal to all configured buttons
+  sendButtonResponses();
+  
   updateDisplay();
   server.sendHeader("Location", "/");
   server.send(302, "text/plain", "Game Started!");
@@ -271,6 +386,14 @@ void handleStart() {
 
 void handleReset() {
   winnerTeam = -1;
+  gameStartTime = millis();
+  winnerTime = 0;
+  
+  // Send reset signal to all configured buttons
+  if (gameActive) {
+    sendButtonResponses();
+  }
+  
   updateDisplay();
   server.sendHeader("Location", "/");
   server.send(302, "text/plain", "Round Reset!");
@@ -279,6 +402,11 @@ void handleReset() {
 void handleStop() {
   gameActive = false;
   winnerTeam = -1;
+  winnerTime = 0;
+  
+  // Send stop signal to all configured buttons
+  sendButtonResponses();
+  
   updateDisplay();
   server.sendHeader("Location", "/");
   server.send(302, "text/plain", "Game Stopped!");
@@ -408,6 +536,49 @@ void parseMacAddress(String macStr, uint8_t* mac) {
     } else {
       mac[i] = 0;
     }
+  }
+}
+
+void sendButtonResponses() {
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (teams[i].isConfigured) {
+      uint8_t message[2];
+      
+      if (!gameActive) {
+        message[0] = 0; // Game stopped
+      } else if (winnerTeam == -1) {
+        message[0] = 3; // Game active, ready
+      } else if (winnerTeam == i) {
+        message[0] = 1; // Winner
+      } else {
+        message[0] = 2; // Locked out
+      }
+      
+      message[1] = 0; // Reserved for future use
+      
+      // Add button as peer if not already added
+      esp_now_peer_info_t peerInfo;
+      memcpy(peerInfo.peer_addr, teams[i].mac, 6);
+      peerInfo.channel = 0;
+      peerInfo.encrypt = false;
+      
+      if (!esp_now_is_peer_exist(teams[i].mac)) {
+        esp_now_add_peer(&peerInfo);
+      }
+      
+      // Send message
+      esp_now_send(teams[i].mac, message, sizeof(message));
+    }
+  }
+}
+
+void logBuzzerEvent(int teamIndex, unsigned long responseTime) {
+  if (!sdCardAvailable) return;
+  
+  File logFile = SD.open("/buzzer_log.txt", FILE_APPEND);
+  if (logFile) {
+    logFile.printf("%lu,%s,%lu\n", millis(), teams[teamIndex].name.c_str(), responseTime);
+    logFile.close();
   }
 }
 
