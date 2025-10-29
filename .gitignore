@@ -7,3 +7,6 @@ dist/
 .vscode/
 .idea/
 *.md
+!button-wiring-guide.md
+!components-list.md
+!README.md
