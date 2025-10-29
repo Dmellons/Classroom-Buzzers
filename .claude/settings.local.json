@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(move:*)",
+      "Bash(mv:*)",
+      "Bash(arduino-cli compile:*)"
+    ],
+    "deny": []
+  }
+}

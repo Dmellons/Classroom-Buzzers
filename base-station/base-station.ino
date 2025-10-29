@@ -52,6 +52,9 @@ Team teams[MAX_TEAMS];
 bool sdCardAvailable = false;
 
 void setup() {
+  Serial.begin(115200);
+  Serial.println("Base Station Starting...");
+  
   // Initialize team structure with defaults
   initializeTeams();
   
@@ -122,8 +125,9 @@ void setup() {
     display.display();
     delay(2000);
   } else {
-    // Register callback for receiving data
+    // Register callbacks for receiving and sending data
     esp_now_register_recv_cb(onDataRecv);
+    esp_now_register_send_cb(onDataSent);
     
     display.clearDisplay();
     display.setCursor(0, 0);
@@ -169,6 +173,11 @@ void loop() {
   delay(2);
 }
 
+// ESP-NOW callback for send status
+void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+  Serial.printf("ESP-NOW Send Status: %s\n", (status == ESP_NOW_SEND_SUCCESS) ? "SUCCESS" : "FAIL");
+}
+
 // ESP-NOW callback function for receiving button presses
 void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
   if (len < 1) return;
@@ -200,7 +209,8 @@ void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData,
   if (messageType == 1) { // Button press
     handleButtonPress(teamIndex);
   } else if (messageType == 2) { // Heartbeat/status
-    // Just update last seen time (already done above)
+    // Send current status and team name back to this specific button
+    sendTeamStatusUpdate(teamIndex);
   }
 }
 
@@ -228,19 +238,6 @@ void updateDisplay() {
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   
-  if (sdCardAvailable) {
-    display.println("Quiz Buzzer System");
-    display.println("[Config Saved]");
-  } else {
-    display.println("Quiz Buzzer System");
-    display.println("[No SD Card]");
-  }
-  
-  display.println();
-  display.printf("WiFi: %s\n", ap_ssid);
-  display.printf("IP: %s\n", WiFi.softAPIP().toString().c_str());
-  display.println();
-  
   if (gameActive) {
     if (winnerTeam >= 0) {
       display.setTextSize(2);
@@ -251,8 +248,23 @@ void updateDisplay() {
     } else {
       display.setTextSize(2);
       display.println("READY!");
+      display.setTextSize(1);
+      display.println("Waiting for buzz...");
     }
   } else {
+    if (sdCardAvailable) {
+      display.println("Quiz Buzzer System");
+      display.println("[Config Saved]");
+    } else {
+      display.println("Quiz Buzzer System");
+      display.println("[No SD Card]");
+    }
+    
+    display.println();
+    display.printf("WiFi: %s\n", ap_ssid);
+    display.printf("IP: %s\n", WiFi.softAPIP().toString().c_str());
+    display.println();
+    
     display.println("Teams:");
     for (int i = 0; i < MAX_TEAMS; i++) {
       display.printf("%d. %s", i + 1, teams[i].name.c_str());
@@ -316,7 +328,9 @@ void handleRoot() {
     for (int j = 0; j < 6; j++) {
       if (j > 0) html += ":";
       if (teams[i].mac[j] < 16) html += "0";
-      html += String(teams[i].mac[j], HEX);
+      String hexByte = String(teams[i].mac[j], HEX);
+      hexByte.toUpperCase();
+      html += hexByte;
     }
     html += "' placeholder='AA:BB:CC:DD:EE:FF' style='width:200px;'></p>";
     
@@ -371,12 +385,14 @@ void handleRoot() {
 }
 
 void handleStart() {
+  Serial.println("=== STARTING GAME ===");
   gameActive = true;
   winnerTeam = -1;
   gameStartTime = millis();
   winnerTime = 0;
   
   // Send start signal to all configured buttons
+  Serial.println("Sending game start messages to all configured teams...");
   sendButtonResponses();
   
   updateDisplay();
@@ -430,6 +446,7 @@ void handleSave() {
     if (server.hasArg(macParam)) {
       String macStr = server.arg(macParam);
       macStr.trim();
+      macStr.toUpperCase(); // Capitalize all letters
       if (macStr.length() > 0) {
         parseMacAddress(macStr, teams[i].mac);
         teams[i].isConfigured = true;
@@ -539,10 +556,55 @@ void parseMacAddress(String macStr, uint8_t* mac) {
   }
 }
 
+void sendTeamStatusUpdate(int teamIndex) {
+  if (teamIndex < 0 || teamIndex >= MAX_TEAMS || !teams[teamIndex].isConfigured) {
+    return;
+  }
+  
+  uint8_t message[32]; // Message with team name
+  memset(message, 0, sizeof(message)); // Clear message buffer
+  
+  // Determine current game status for this team
+  if (!gameActive) {
+    message[0] = 0; // Game stopped
+  } else if (winnerTeam == -1) {
+    message[0] = 3; // Game active, ready
+  } else if (winnerTeam == teamIndex) {
+    message[0] = 1; // Winner
+  } else {
+    message[0] = 2; // Locked out
+  }
+  
+  // Add team name starting at byte 1 (max 30 chars + null terminator)
+  String teamName = teams[teamIndex].name;
+  if (teamName.length() > 30) teamName = teamName.substring(0, 30);
+  strcpy((char*)&message[1], teamName.c_str());
+  
+  // Debug: Print what we're about to send
+  Serial.printf("Heartbeat response - Team %d (%s): Sending message %d\n",
+    teamIndex + 1, teams[teamIndex].name.c_str(), message[0]);
+  
+  // Add button as peer if not already added
+  esp_now_peer_info_t peerInfo;
+  memcpy(peerInfo.peer_addr, teams[teamIndex].mac, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  
+  if (!esp_now_is_peer_exist(teams[teamIndex].mac)) {
+    esp_err_t addResult = esp_now_add_peer(&peerInfo);
+    Serial.printf("Adding peer: %s\n", (addResult == ESP_OK) ? "SUCCESS" : "FAILED");
+  }
+  
+  // Send message
+  esp_err_t sendResult = esp_now_send(teams[teamIndex].mac, message, sizeof(message));
+  Serial.printf("Team status update result: %s\n", (sendResult == ESP_OK) ? "OK" : "ERROR");
+}
+
 void sendButtonResponses() {
   for (int i = 0; i < MAX_TEAMS; i++) {
     if (teams[i].isConfigured) {
-      uint8_t message[2];
+      uint8_t message[32]; // Increased size for team name
+      memset(message, 0, sizeof(message)); // Clear message buffer
       
       if (!gameActive) {
         message[0] = 0; // Game stopped
@@ -554,7 +616,16 @@ void sendButtonResponses() {
         message[0] = 2; // Locked out
       }
       
-      message[1] = 0; // Reserved for future use
+      // Add team name starting at byte 1 (max 30 chars + null terminator)
+      String teamName = teams[i].name;
+      if (teamName.length() > 30) teamName = teamName.substring(0, 30);
+      strcpy((char*)&message[1], teamName.c_str());
+      
+      // Debug: Print what we're about to send
+      Serial.printf("Team %d (%s): Sending message %d to %02X:%02X:%02X:%02X:%02X:%02X\n",
+        i + 1, teams[i].name.c_str(), message[0],
+        teams[i].mac[0], teams[i].mac[1], teams[i].mac[2],
+        teams[i].mac[3], teams[i].mac[4], teams[i].mac[5]);
       
       // Add button as peer if not already added
       esp_now_peer_info_t peerInfo;
@@ -563,11 +634,13 @@ void sendButtonResponses() {
       peerInfo.encrypt = false;
       
       if (!esp_now_is_peer_exist(teams[i].mac)) {
-        esp_now_add_peer(&peerInfo);
+        esp_err_t addResult = esp_now_add_peer(&peerInfo);
+        Serial.printf("Adding peer: %s\n", (addResult == ESP_OK) ? "SUCCESS" : "FAILED");
       }
       
       // Send message
-      esp_now_send(teams[i].mac, message, sizeof(message));
+      esp_err_t sendResult = esp_now_send(teams[i].mac, message, sizeof(message));
+      Serial.printf("esp_now_send result: %s\n", (sendResult == ESP_OK) ? "OK" : "ERROR");
     }
   }
 }

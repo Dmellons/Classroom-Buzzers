@@ -10,3 +10,4 @@ dist/
 !button-wiring-guide.md
 !components-list.md
 !README.md
+tests/

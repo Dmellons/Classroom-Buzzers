@@ -3,7 +3,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "button-secret.h" // Commented out as requested
+#include "button-secret.h"
 
 // Display configuration
 #define SCREEN_WIDTH 128
@@ -11,30 +11,27 @@
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Pin definitions for ESP32-C6
+// Pin definitions for ESP32-C6 (Breadboard Version)
 #define I2C_SDA 6
 #define I2C_SCL 7
 #define BUTTON_PIN 15 // Button input pin
-#define LED_PIN 2 // Built-in LED control pin (for boost converter enable)
-#define BOOST_EN_PIN 4 // Boost converter enable pin
+#define STATUS_LED_PIN 2 // Built-in LED for status (optional)
+#define SPEAKER_PIN 8 // PWM pin for 3W speaker
 
 // Base station MAC address
-// Example Mac: 40:4c:ca:57:97:f0
-// uint8_t baseStationMAC[] = {0x40, 0x4c, 0xca, 0x57, 0x97, 0xf0}; // ACTIVE MAC for testing
-uint8_t baseStationMAC[] = BASE_STATION_MAC; // UNUSED
+uint8_t baseStationMAC[] = BASE_STATION_MAC;
 
 bool ledState = false;
 unsigned long lastPressTime = 0;
 const unsigned long debounceDelay = 50;
 
-// FIX: Declare the flag used in the Interrupt Service Routine (ISR)
-volatile bool buttonPressed = false;
+// Declare the flag used in the Interrupt Service Routine (ISR)
+volatile bool buttonPressed = false; 
 
-// Battery management
-unsigned long lastActivity = 0;
-const unsigned long sleepTimeout = 300000; // 5 minutes of inactivity
-const unsigned long lowBatteryCheck = 60000; // Check battery every minute
-unsigned long lastBatteryCheck = 0; 
+// Global debug variables
+unsigned long lastHeartbeatTime = 0;
+bool heartbeatSuccess = false;
+int messagesReceived = 0;
 
 // Game state
 enum ButtonState {
@@ -45,6 +42,71 @@ enum ButtonState {
 };
 
 ButtonState currentState = WAITING;
+String teamName = ""; // Team name received from base station
+
+// Interrupt handler for button press
+void IRAM_ATTR buttonISR() {
+  buttonPressed = true;
+}
+
+// ESP-NOW callback for receiving data from base station
+void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
+  if (len < 1) return;
+  
+  uint8_t response = incomingData[0];
+  messagesReceived++; // Count messages received
+  
+  // Extract team name if message is long enough
+  if (len > 1) {
+    teamName = String((char*)&incomingData[1]);
+    teamName.trim(); // Remove any trailing whitespace
+    Serial.printf("Received team name: '%s'\n", teamName.c_str());
+  }
+  
+  // Debug: Print received message
+  Serial.printf("Received ESP-NOW message: %d\n", response);
+  
+  switch (response) {
+    case 0: // Game stopped
+      currentState = WAITING;
+      setStatusLED(false);
+      updateDisplay();
+      Serial.println("Game stopped");
+      break;
+      
+    case 1: // Winner!
+      currentState = WINNER;
+      blinkStatusLED(5); // Blink 5 times to celebrate
+      setStatusLED(true); // Keep LED on
+      playWinnerSound(); // Victory fanfare
+      updateDisplay();
+      Serial.println("We won!");
+      break;
+      
+    case 2: // Locked out (another team won)
+      currentState = LOCKED_OUT;
+      setStatusLED(false);
+      playLockoutSound(); // Sad sound
+      updateDisplay();
+      Serial.println("Locked out");
+      break;
+      
+    case 3: // Game active, ready to buzz
+      currentState = READY;
+      setStatusLED(false);
+      playReadySound(); // Quick ready beep
+      updateDisplay();
+      Serial.println("Game active - ready!");
+      break;
+  }
+}
+
+// Updated callback signature for ESP32 Arduino Core 3.x
+void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+  heartbeatSuccess = (status == ESP_NOW_SEND_SUCCESS);
+  Serial.print("Send Status: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+}
 
 void updateDisplay() {
   display.clearDisplay();
@@ -52,23 +114,32 @@ void updateDisplay() {
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   
-  // Show MAC address (last 3 bytes for identification)
-  String mac = WiFi.macAddress();
-  display.printf("ID: %s\n", mac.substring(9).c_str());
-  
-  // Show battery voltage
-  float voltage = getBatteryVoltage();
-  display.printf("Bat: %.2fV\n", voltage);
-  
   // Show current state
-  display.setTextSize(1);
   switch (currentState) {
     case WAITING:
-      display.println("Status: WAITING");
-      display.println("Game not started");
+      if (teamName.length() > 0) {
+        // Connected - show team name prominently
+        display.setTextSize(2);
+        display.println(teamName.c_str());
+        display.setTextSize(1);
+        display.println("");
+        display.println("Ready to play!");
+      } else {
+        // Not connected - show connection info
+        String mac = WiFi.macAddress();
+        mac.toUpperCase();
+        display.printf("MAC:%s\n", mac.c_str());
+        display.printf("HB:%s Msg:%d\n", heartbeatSuccess ? "OK" : "FAIL", messagesReceived);
+        display.println("Connecting...");
+      }
       break;
       
     case READY:
+      // Show team name and ready status
+      display.setTextSize(1);
+      if (teamName.length() > 0) {
+        display.println(teamName.c_str());
+      }
       display.setTextSize(2);
       display.println("READY!");
       display.setTextSize(1);
@@ -76,6 +147,11 @@ void updateDisplay() {
       break;
       
     case WINNER:
+      // Show team name and winner status
+      display.setTextSize(1);
+      if (teamName.length() > 0) {
+        display.println(teamName.c_str());
+      }
       display.setTextSize(2);
       display.println("WINNER!");
       display.setTextSize(1);
@@ -83,7 +159,14 @@ void updateDisplay() {
       break;
       
     case LOCKED_OUT:
-      display.println("Status: LOCKED");
+      // Show team name and locked status
+      display.setTextSize(1);
+      if (teamName.length() > 0) {
+        display.println(teamName.c_str());
+      }
+      display.setTextSize(2);
+      display.println("LOCKED");
+      display.setTextSize(1);
       display.println("Too late!");
       break;
   }
@@ -91,96 +174,95 @@ void updateDisplay() {
   display.display();
 }
 
-// LED patterns for different states
+void setStatusLED(bool state) {
+  ledState = state;
+  digitalWrite(STATUS_LED_PIN, state ? HIGH : LOW);
+}
+
+void blinkStatusLED(int times) {
+  for (int i = 0; i < times; i++) {
+    setStatusLED(true);
+    delay(100);
+    setStatusLED(false);
+    delay(100);
+  }
+}
+
+// Speaker audio feedback functions
+void playTone(int frequency, int duration) {
+  if (frequency > 0) {
+    tone(SPEAKER_PIN, frequency, duration);
+  }
+  delay(duration);
+  noTone(SPEAKER_PIN);
+}
+
+void playBuzzSound() {
+  // Aggressive buzzer sound - descending notes
+  playTone(800, 150);
+  playTone(600, 150);
+  playTone(400, 200);
+}
+
+void playWinnerSound() {
+  // Victory fanfare - ascending notes
+  playTone(523, 200); // C
+  playTone(659, 200); // E  
+  playTone(784, 200); // G
+  playTone(1047, 400); // C (high)
+}
+
+void playLockoutSound() {
+  // Sad descending tone
+  playTone(400, 300);
+  playTone(300, 300);
+  playTone(200, 500);
+}
+
+void playReadySound() {
+  // Quick ascending beep
+  playTone(500, 100);
+  playTone(700, 100);
+}
+
+void playStartupSound() {
+  // Boot-up melody
+  playTone(262, 150); // C
+  playTone(330, 150); // E
+  playTone(392, 150); // G
+  playTone(523, 200); // C (high)
+}
+
+// LED patterns for different states (using built-in LED)
 void showStatePattern() {
   switch (currentState) {
     case WAITING:
       // Slow pulse every 3 seconds
       if (millis() % 3000 < 100) {
-        setLED(true);
+        setStatusLED(true);
       } else {
-        setLED(false);
+        setStatusLED(false);
       }
       break;
       
     case READY:
       // Fast blink to show ready
       if (millis() % 500 < 250) {
-        setLED(true);
+        setStatusLED(true);
       } else {
-        setLED(false);
+        setStatusLED(false);
       }
       break;
       
     case WINNER:
       // Solid on
-      setLED(true);
+      setStatusLED(true);
       break;
       
     case LOCKED_OUT:
       // Off
-      setLED(false);
+      setStatusLED(false);
       break;
-  }
-}
-
-// Interrupt handler for button press
-void IRAM_ATTR buttonISR() {
-  buttonPressed = true;
-}
-
-// ESP-NOW callback for receiving data from base station (ESP32-C6 compatible)
-void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
-  if (len < 2) return;
-  
-  uint8_t response = incomingData[0];
-  
-  switch (response) {
-    case 0: // Game stopped
-      currentState = WAITING;
-      setLED(false);
-      updateDisplay();
-      break;
-      
-    case 1: // Winner!
-      currentState = WINNER;
-      blinkLED(5); // Blink 5 times to celebrate
-      setLED(true); // Keep LED on
-      updateDisplay();
-      break;
-      
-    case 2: // Locked out (another team won)
-      currentState = LOCKED_OUT;
-      setLED(false);
-      updateDisplay();
-      break;
-      
-    case 3: // Game active, ready to buzz
-      currentState = READY;
-      setLED(false);
-      updateDisplay();
-      break;
-  }
-}
-
-// FIXED: Updated callback signature for ESP32 Arduino Core 3.x
-void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
-  Serial.print("Send Status: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
-}
-
-void setLED(bool state) {
-  ledState = state;
-  digitalWrite(BOOST_EN_PIN, state ? HIGH : LOW);
-  digitalWrite(LED_PIN, state ? HIGH : LOW);
-}
-
-void blinkLED(int times) {
-  for (int i = 0; i < times; i++) {
-    setLED(true);
-    delay(100);
-    setLED(false);
-    delay(100);
   }
 }
 
@@ -206,38 +288,9 @@ void sendHeartbeat() {
   esp_err_t result = esp_now_send(baseStationMAC, data, sizeof(data));
   
   if (result == ESP_OK) {
-    Serial.println("Heartbeat sent");
+    Serial.println("Heartbeat sent successfully");
   } else {
-    Serial.println("Error sending heartbeat");
-  }
-}
-
-float getBatteryVoltage() {
-  // Read battery voltage from ADC
-  // ESP32-C6 has built-in voltage divider on GPIO7 for battery monitoring
-  int adcValue = analogRead(A0); // Use A0 for battery voltage
-  float voltage = (adcValue / 4095.0) * 3.3 * 2; // Convert to actual battery voltage
-  return voltage;
-}
-
-void checkBatteryLevel() {
-  float voltage = getBatteryVoltage();
-  Serial.printf("Battery: %.2fV\n", voltage);
-  
-  if (voltage < 3.2) { // Low battery warning
-    Serial.println("Low battery warning!");
-    // Flash LED pattern for low battery
-    for (int i = 0; i < 3; i++) {
-      setLED(true);
-      delay(100);
-      setLED(false);
-      delay(100);
-    }
-  }
-  
-  if (voltage < 3.0) { // Critical battery - enter sleep
-    Serial.println("Critical battery - entering deep sleep");
-    enterDeepSleep();
+    Serial.printf("Error sending heartbeat: %d\n", result);
   }
 }
 
@@ -264,17 +317,21 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLDOWN);
   attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, RISING);
   
-  // Configure LED control pins
-  pinMode(LED_PIN, OUTPUT);
-  pinMode(BOOST_EN_PIN, OUTPUT);
-  setLED(false);
+  // Configure status LED pin
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  setStatusLED(false);
+  
+  // Configure speaker pin
+  pinMode(SPEAKER_PIN, OUTPUT);
   
   // Set device as Wi-Fi station
   WiFi.mode(WIFI_STA);
   
   // Print MAC address for registration with base station
   Serial.print("Button MAC Address: ");
-  Serial.println(WiFi.macAddress());
+  String macForSerial = WiFi.macAddress();
+  macForSerial.toUpperCase();
+  Serial.println(macForSerial);
   
   // Initialize ESP-NOW
   if (esp_now_init() != ESP_OK) {
@@ -299,13 +356,24 @@ void setup() {
   
   // Initial state
   currentState = WAITING;
-  lastActivity = millis(); // Initialize activity timer
   
   // Blink LED twice to show ready
-  blinkLED(2);
+  blinkStatusLED(2);
+  
+  // Play startup sound
+  playStartupSound();
   
   Serial.println("Button Ready");
-  Serial.printf("Initial battery: %.2fV\\n", getBatteryVoltage());
+  Serial.println("Breadboard version - USB powered with 3W speaker");
+  
+  // Print base station MAC we're trying to connect to
+  Serial.print("Base Station MAC: ");
+  for (int i = 0; i < 6; i++) {
+    if (i > 0) Serial.print(":");
+    if (baseStationMAC[i] < 16) Serial.print("0");
+    Serial.print(baseStationMAC[i], HEX);
+  }
+  Serial.println();
   
   // Update display to show ready state
   updateDisplay();
@@ -326,20 +394,22 @@ void loop() {
       // Only send buzz if in READY state
       if (currentState == READY) {
         Serial.println("Button pressed - sending buzz");
+        playBuzzSound(); // Immediate audio feedback
         sendBuzzer();
-        lastActivity = currentTime; // Reset activity timer
         
         // Brief LED flash to acknowledge press
-        setLED(true);
+        setStatusLED(true);
         delay(50);
-        setLED(false);
+        setStatusLED(false);
       } else if (currentState == WAITING) {
         // Flash LED to indicate game hasn't started
-        blinkLED(1);
+        blinkStatusLED(1);
+        playTone(200, 200); // Low error tone
         Serial.println("Game not active - button press ignored");
       } else if (currentState == LOCKED_OUT) {
-        // Brief red flash to show locked out
-        blinkLED(1);
+        // Brief flash to show locked out
+        blinkStatusLED(1);
+        playTone(150, 300); // Very low error tone
         Serial.println("Locked out - button press ignored");
       }
     }
@@ -352,19 +422,6 @@ void loop() {
   if (currentTime - lastHeartbeat > heartbeatInterval) {
     sendHeartbeat();
     lastHeartbeat = currentTime;
-    lastActivity = currentTime; // Reset activity timer on heartbeat
-  }
-  
-  // Check battery level periodically
-  if (currentTime - lastBatteryCheck > lowBatteryCheck) {
-    checkBatteryLevel();
-    lastBatteryCheck = currentTime;
-  }
-  
-  // Check for sleep timeout (no activity for 5 minutes)
-  if (currentTime - lastActivity > sleepTimeout) {
-    Serial.println("Entering sleep due to inactivity");
-    enterDeepSleep();
   }
   
   // Update LED pattern based on current state
@@ -378,7 +435,7 @@ void loop() {
     lastLedUpdate = currentTime;
   }
   
-  // Update display every 5 seconds to refresh battery voltage
+  // Update display every 5 seconds (less frequent than battery version)
   if (currentTime - lastDisplayUpdate > 5000) {
     updateDisplay();
     lastDisplayUpdate = currentTime;
@@ -386,26 +443,4 @@ void loop() {
   
   // Small delay to prevent watchdog issues
   delay(10);
-}
-
-// FIXED: Deep sleep function for ESP32-C6
-// Note: ESP32-C6 uses GPIO wakeup instead of ext0
-void enterDeepSleep() {
-  Serial.println("Entering deep sleep...");
-  setLED(false);
-  
-  // Turn off boost converter to save power
-  digitalWrite(BOOST_EN_PIN, LOW);
-  
-  // Configure GPIO wakeup (ESP32-C6 compatible)
-  esp_sleep_enable_gpio_wakeup();
-  gpio_wakeup_enable((gpio_num_t)BUTTON_PIN, GPIO_INTR_HIGH_LEVEL);
-  
-  // Also wake up after 30 minutes to send heartbeat
-  esp_sleep_enable_timer_wakeup(30 * 60 * 1000000); // 30 minutes in microseconds
-  
-  Serial.println("Good night!");
-  delay(100); // Allow serial to finish
-  
-  esp_deep_sleep_start();
 }

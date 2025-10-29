@@ -8,7 +8,7 @@ void setup() {
   Serial.flush();
   
   // Initialize I2C with ESP32-C6 pins
-  Wire.begin(6, 7);
+  can Wire.begin(6, 7);
   Serial.println("I2C initialized (SDA=GPIO6, SCL=GPIO7)");
   
   // Initialize display
