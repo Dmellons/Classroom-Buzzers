@@ -233,4 +233,4 @@ Option 2: 12V LED (if button LED is 12V):
 **Battery drains quickly:**
 - Implement deep sleep mode (code included)
 - Check for short circuits
-- Reduce LED brightness/duration
+- Reduce LED brightness/durationgit 

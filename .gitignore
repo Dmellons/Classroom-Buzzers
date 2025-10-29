@@ -1,2 +1,9 @@
 .env
 */*secret.h
+*.log
+.DS_Store
+node_modules/
+dist/
+.vscode/
+.idea/
+*.md
