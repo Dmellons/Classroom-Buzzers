@@ -44,6 +44,10 @@ enum ButtonState {
 ButtonState currentState = WAITING;
 String teamName = ""; // Team name received from base station
 
+// Debug counters for OLED display
+int buttonPressCount = 0;
+int messagesSent = 0;
+
 // Interrupt handler for button press
 void IRAM_ATTR buttonISR() {
   buttonPressed = true;
@@ -125,12 +129,12 @@ void updateDisplay() {
         display.println("");
         display.println("Ready to play!");
       } else {
-        // Not connected - show connection info
+        // Not connected - show connection info and debug
         String mac = WiFi.macAddress();
         mac.toUpperCase();
         display.printf("MAC:%s\n", mac.c_str());
         display.printf("HB:%s Msg:%d\n", heartbeatSuccess ? "OK" : "FAIL", messagesReceived);
-        display.println("Connecting...");
+        display.printf("BtnPress:%d Sent:%d\n", buttonPressCount, messagesSent);
       }
       break;
       
@@ -286,6 +290,7 @@ void sendHeartbeat() {
   data[1] = 0; // Reserved for future use
   
   esp_err_t result = esp_now_send(baseStationMAC, data, sizeof(data));
+  messagesSent++;
   
   if (result == ESP_OK) {
     Serial.println("Heartbeat sent successfully");
@@ -391,11 +396,15 @@ void loop() {
     if (currentTime - lastPressTime > debounceDelay) {
       lastPressTime = currentTime;
       
+      // Count button press for debugging
+      buttonPressCount++;
+      
       // Only send buzz if in READY state
       if (currentState == READY) {
         Serial.println("Button pressed - sending buzz");
         playBuzzSound(); // Immediate audio feedback
         sendBuzzer();
+        messagesSent++;
         
         // Brief LED flash to acknowledge press
         setStatusLED(true);
@@ -412,6 +421,9 @@ void loop() {
         playTone(150, 300); // Very low error tone
         Serial.println("Locked out - button press ignored");
       }
+      
+      // Update display immediately to show button press registered
+      updateDisplay();
     }
     
     // Reset the flag
