@@ -3,7 +3,9 @@
     "allow": [
       "Bash(move:*)",
       "Bash(mv:*)",
-      "Bash(arduino-cli compile:*)"
+      "Bash(arduino-cli compile:*)",
+      "Bash(where esptool.py)",
+      "Bash(dir \"C:\\Users\\david\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esptool_py\")"
     ],
     "deny": []
   }

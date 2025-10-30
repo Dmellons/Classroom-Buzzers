@@ -48,6 +48,12 @@ String teamName = ""; // Team name received from base station
 int buttonPressCount = 0;
 int messagesSent = 0;
 
+// Track state changes to prevent repeating sounds
+ButtonState lastState = WAITING;
+
+// Audio settings
+bool audioMuted = false;
+
 // Interrupt handler for button press
 void IRAM_ATTR buttonISR() {
   buttonPressed = true;
@@ -60,11 +66,12 @@ void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData,
   uint8_t response = incomingData[0];
   messagesReceived++; // Count messages received
   
-  // Extract team name if message is long enough
-  if (len > 1) {
-    teamName = String((char*)&incomingData[1]);
+  // Extract mute flag and team name if message is long enough
+  if (len > 2) {
+    audioMuted = (incomingData[1] == 1);
+    teamName = String((char*)&incomingData[2]);
     teamName.trim(); // Remove any trailing whitespace
-    Serial.printf("Received team name: '%s'\n", teamName.c_str());
+    Serial.printf("Received team name: '%s', muted: %s\n", teamName.c_str(), audioMuted ? "YES" : "NO");
   }
   
   // Debug: Print received message
@@ -90,15 +97,18 @@ void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData,
     case 2: // Locked out (another team won)
       currentState = LOCKED_OUT;
       setStatusLED(false);
-      playLockoutSound(); // Sad sound
+      // No automatic lockout sound - only play when button pressed while locked
       updateDisplay();
       Serial.println("Locked out");
       break;
       
     case 3: // Game active, ready to buzz
+      // Only play ready sound if this is a new state change
+      if (currentState != READY) {
+        playReadySound(); // Quick ready beep only on state change
+      }
       currentState = READY;
       setStatusLED(false);
-      playReadySound(); // Quick ready beep
       updateDisplay();
       Serial.println("Game active - ready!");
       break;
@@ -194,11 +204,13 @@ void blinkStatusLED(int times) {
 
 // Speaker audio feedback functions
 void playTone(int frequency, int duration) {
-  if (frequency > 0) {
+  if (!audioMuted && frequency > 0) {
     tone(SPEAKER_PIN, frequency, duration);
   }
   delay(duration);
-  noTone(SPEAKER_PIN);
+  if (!audioMuted) {
+    noTone(SPEAKER_PIN);
+  }
 }
 
 void playBuzzSound() {
@@ -209,11 +221,9 @@ void playBuzzSound() {
 }
 
 void playWinnerSound() {
-  // Victory fanfare - ascending notes
-  playTone(523, 200); // C
-  playTone(659, 200); // E  
-  playTone(784, 200); // G
-  playTone(1047, 400); // C (high)
+  // Simple victory sound
+  playTone(800, 300);
+  playTone(1000, 400);
 }
 
 void playLockoutSound() {
@@ -224,9 +234,8 @@ void playLockoutSound() {
 }
 
 void playReadySound() {
-  // Quick ascending beep
-  playTone(500, 100);
-  playTone(700, 100);
+  // Single ready beep
+  playTone(600, 200);
 }
 
 void playStartupSound() {
@@ -416,9 +425,9 @@ void loop() {
         playTone(200, 200); // Low error tone
         Serial.println("Game not active - button press ignored");
       } else if (currentState == LOCKED_OUT) {
-        // Brief flash to show locked out
+        // Brief flash to show locked out and play lockout sound
         blinkStatusLED(1);
-        playTone(150, 300); // Very low error tone
+        playLockoutSound(); // Play lockout sound only when pressed while locked
         Serial.println("Locked out - button press ignored");
       }
       

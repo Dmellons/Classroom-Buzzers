@@ -36,6 +36,9 @@ int winnerTeam = -1;
 unsigned long gameStartTime = 0;
 unsigned long winnerTime = 0;
 
+// Audio settings
+bool audioMuted = false;
+
 // Team configuration
 #define MAX_TEAMS 4
 struct Team {
@@ -44,6 +47,7 @@ struct Team {
   bool isConfigured;
   bool isOnline;
   unsigned long lastSeen;
+  bool isMuted;
 };
 
 Team teams[MAX_TEAMS];
@@ -142,6 +146,10 @@ void setup() {
   server.on("/reset", handleReset);
   server.on("/stop", handleStop);
   server.on("/save", handleSave);
+  server.on("/mute", handleMute);
+  server.on("/unmute", handleUnmute);
+  server.on("/mute-team", handleMuteTeam);
+  server.on("/unmute-team", handleUnmuteTeam);
   server.begin();
   
   // Blink LED to show ready
@@ -305,6 +313,16 @@ void handleRoot() {
     html += "<button onclick=\"location.href='/start'\">START GAME</button>";
   }
   
+  // Add audio control
+  html += "<hr><h3>Audio Settings</h3>";
+  if (audioMuted) {
+    html += "<p>🔇 Audio: MUTED</p>";
+    html += "<button onclick=\"location.href='/unmute'\">UNMUTE ALL BUTTONS</button>";
+  } else {
+    html += "<p>🔊 Audio: ENABLED</p>";
+    html += "<button onclick=\"location.href='/mute'\">MUTE ALL BUTTONS</button>";
+  }
+  
   // Add ESP-NOW status
   html += "<hr><h3>ESP-NOW Status</h3>";
   html += "<p><strong>Base Station MAC:</strong> " + WiFi.macAddress() + "</p>";
@@ -352,7 +370,7 @@ void handleRoot() {
   
   html += "<hr><h3>Current Teams:</h3>";
   html += "<table style='border-collapse:collapse;width:100%;'>";
-  html += "<tr style='background:#f0f0f0;'><th style='border:1px solid #ccc;padding:8px;'>Team</th><th style='border:1px solid #ccc;padding:8px;'>Name</th><th style='border:1px solid #ccc;padding:8px;'>Status</th></tr>";
+  html += "<tr style='background:#f0f0f0;'><th style='border:1px solid #ccc;padding:8px;'>Team</th><th style='border:1px solid #ccc;padding:8px;'>Name</th><th style='border:1px solid #ccc;padding:8px;'>Status</th><th style='border:1px solid #ccc;padding:8px;'>Audio</th></tr>";
   
   for (int i = 0; i < MAX_TEAMS; i++) {
     html += "<tr><td style='border:1px solid #ccc;padding:8px;'>" + String(i + 1) + "</td>";
@@ -368,6 +386,25 @@ void handleRoot() {
     } else {
       html += "<span style='color:red'>●</span> Not configured";
     }
+    
+    html += "</td><td style='border:1px solid #ccc;padding:8px;'>";
+    
+    // Individual mute controls
+    if (teams[i].isConfigured) {
+      if (teams[i].isMuted || audioMuted) {
+        html += "🔇 ";
+        if (!audioMuted) { // Only show unmute if not globally muted
+          html += "<a href='/unmute-team?id=" + String(i) + "' style='font-size:12px;'>Unmute</a>";
+        } else {
+          html += "<span style='font-size:12px;color:gray;'>Global Mute</span>";
+        }
+      } else {
+        html += "🔊 <a href='/mute-team?id=" + String(i) + "' style='font-size:12px;'>Mute</a>";
+      }
+    } else {
+      html += "-";
+    }
+    
     html += "</td></tr>";
   }
   html += "</table>";
@@ -428,6 +465,74 @@ void handleStop() {
   server.send(302, "text/plain", "Game Stopped!");
 }
 
+void handleMute() {
+  audioMuted = true;
+  
+  // Send updated status to all buttons to apply mute setting
+  sendButtonResponses();
+  
+  updateDisplay();
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "All Buttons Muted!");
+}
+
+void handleUnmute() {
+  audioMuted = false;
+  
+  // Send updated status to all buttons to apply unmute setting
+  sendButtonResponses();
+  
+  updateDisplay();
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "All Buttons Unmuted!");
+}
+
+void handleMuteTeam() {
+  if (server.hasArg("id")) {
+    int teamId = server.arg("id").toInt();
+    if (teamId >= 0 && teamId < MAX_TEAMS && teams[teamId].isConfigured) {
+      teams[teamId].isMuted = true;
+      
+      // Send updated status to this specific team
+      sendTeamStatusUpdate(teamId);
+      
+      // Save configuration to persist mute state
+      saveConfig();
+      
+      updateDisplay();
+      server.sendHeader("Location", "/");
+      server.send(302, "text/plain", teams[teamId].name + " Muted!");
+      return;
+    }
+  }
+  
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "Invalid team!");
+}
+
+void handleUnmuteTeam() {
+  if (server.hasArg("id")) {
+    int teamId = server.arg("id").toInt();
+    if (teamId >= 0 && teamId < MAX_TEAMS && teams[teamId].isConfigured) {
+      teams[teamId].isMuted = false;
+      
+      // Send updated status to this specific team
+      sendTeamStatusUpdate(teamId);
+      
+      // Save configuration to persist mute state
+      saveConfig();
+      
+      updateDisplay();
+      server.sendHeader("Location", "/");
+      server.send(302, "text/plain", teams[teamId].name + " Unmuted!");
+      return;
+    }
+  }
+  
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "Invalid team!");
+}
+
 void handleSave() {
   // Update team names and MAC addresses from form data
   for (int i = 0; i < MAX_TEAMS; i++) {
@@ -482,6 +587,7 @@ void saveConfig() {
       }
       configFile.println();
       configFile.println(teams[i].isConfigured ? "1" : "0");
+      configFile.println(teams[i].isMuted ? "1" : "0");
     }
     configFile.close();
   }
@@ -524,6 +630,14 @@ void loadConfig() {
         // Load configuration status
         String configStr = configFile.readStringUntil('\n');
         teams[i].isConfigured = (configStr.toInt() == 1);
+        
+        // Load mute flag (if available, default to false for older config files)
+        if (configFile.available()) {
+          String muteStr = configFile.readStringUntil('\n');
+          teams[i].isMuted = (muteStr.toInt() == 1);
+        } else {
+          teams[i].isMuted = false;
+        }
       }
     }
     configFile.close();
@@ -539,6 +653,7 @@ void initializeTeams() {
     teams[i].isConfigured = false;
     teams[i].isOnline = false;
     teams[i].lastSeen = 0;
+    teams[i].isMuted = false;
   }
 }
 
@@ -575,10 +690,13 @@ void sendTeamStatusUpdate(int teamIndex) {
     message[0] = 2; // Locked out
   }
   
-  // Add team name starting at byte 1 (max 30 chars + null terminator)
+  // Add individual mute flag at byte 1 (individual team mute OR global mute)
+  message[1] = (audioMuted || teams[teamIndex].isMuted) ? 1 : 0;
+  
+  // Add team name starting at byte 2 (max 29 chars + null terminator)
   String teamName = teams[teamIndex].name;
-  if (teamName.length() > 30) teamName = teamName.substring(0, 30);
-  strcpy((char*)&message[1], teamName.c_str());
+  if (teamName.length() > 29) teamName = teamName.substring(0, 29);
+  strcpy((char*)&message[2], teamName.c_str());
   
   // Debug: Print what we're about to send
   Serial.printf("Heartbeat response - Team %d (%s): Sending message %d\n",
@@ -616,10 +734,13 @@ void sendButtonResponses() {
         message[0] = 2; // Locked out
       }
       
-      // Add team name starting at byte 1 (max 30 chars + null terminator)
+      // Add individual mute flag at byte 1 (individual team mute OR global mute)
+      message[1] = (audioMuted || teams[i].isMuted) ? 1 : 0;
+      
+      // Add team name starting at byte 2 (max 29 chars + null terminator)
       String teamName = teams[i].name;
-      if (teamName.length() > 30) teamName = teamName.substring(0, 30);
-      strcpy((char*)&message[1], teamName.c_str());
+      if (teamName.length() > 29) teamName = teamName.substring(0, 29);
+      strcpy((char*)&message[2], teamName.c_str());
       
       // Debug: Print what we're about to send
       Serial.printf("Team %d (%s): Sending message %d to %02X:%02X:%02X:%02X:%02X:%02X\n",
