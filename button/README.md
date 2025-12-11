@@ -1,61 +1,122 @@
 # Button Unit Setup Guide
 
-Each button unit is a self-contained wireless buzzer powered by an 18650 battery. It communicates with the base station using ESP-NOW and provides LED feedback through the arcade button.
+Each button unit is a self-contained wireless buzzer powered by a LiPo battery. It communicates with the base station using ESP-NOW and provides:
+- **OLED Display** showing team name, battery level, and game status
+- **Audio Feedback** with buzzer sounds, victory tunes, and lockout tones
+- **Visual Feedback** through built-in status LED and optional arcade button LED
+- **Battery Monitoring** with real-time voltage and percentage display
+- **Team Name Sync** via automatic heartbeat system
 
 ## 📋 Hardware Components (Per Button)
+
+### Required Components
 
 | Component | Quantity | Specifications |
 |-----------|----------|----------------|
 | ESP32-C6-DevKitC-1 | 1 | Main microcontroller |
-| 60mm LED Arcade Button | 1 | With built-in LED (5V or 12V) |
-| 18650 Li-ion Battery | 1 | 3.7V, protected cell recommended |
+| 0.91" OLED Display | 1 | 128x32 I2C SSD1306 |
+| 3W Speaker | 1 | 3W 8Ω speaker for audio feedback |
+| 60mm LED Arcade Button | 1 | Large arcade button with microswitch |
+| 503035 LiPo Battery | 1 | 3.7V 500mAh (or 18650 for longer runtime) |
 | TP4056 Charging Module | 1 | With protection circuit |
-| MT3608 Boost Converter | 2 | One for ESP32 (3.7V→5V), one for LED (3.7V→12V) |
-| 2N2222 NPN Transistor | 1 | Or any similar NPN transistor |
+| MT3608 Boost Converter | 1 | For ESP32 (3.7V→5V) |
 | 10kΩ Resistor | 1 | For button pull-down |
-| 1kΩ Resistor | 1 | For transistor base |
+| 1kΩ Resistor | 1 | For power LED |
+| 47kΩ Resistor | 2 | For battery voltage divider |
+| Power Indicator LED | 1 | 3mm or 5mm, any color |
 | Toggle Switch | 1 | SPST, for main power |
-| 18650 Battery Holder | 1 | With solder tabs or wires |
 | Jumper Wires | Various | 22-24 AWG recommended |
+
+### Optional Components (for Arcade Button LED Illumination)
+
+| Component | Quantity | Specifications |
+|-----------|----------|----------------|
+| MT3608 Boost Converter | 1 | For LED (3.7V→12V) |
+| 2N2222 NPN Transistor | 1 | Or any similar NPN transistor |
+| 1kΩ Resistor | 1 | For transistor base |
+| 330Ω Resistor | 1 | LED current limiting |
 
 ## 🔌 Wiring Diagram
 
+### Complete Pin Assignments
+
+| Function | ESP32-C6 Pin | Notes |
+|----------|--------------|-------|
+| OLED SDA | GPIO6 | I2C data |
+| OLED SCL | GPIO7 | I2C clock |
+| Button Input | GPIO15 | With 10kΩ pull-down |
+| Status LED | GPIO2 | Built-in LED |
+| Speaker | GPIO8 | PWM audio output |
+| Battery Monitor | GPIO1 | ADC voltage sensing |
+| LED Control | GPIO4 | Optional arcade button LED |
+| Power (5V) | VIN | From boost converter |
+| Ground | GND | Common ground |
+
 ### Power System
 ```
-18650 Battery (+) → TP4056 BAT+
-18650 Battery (-) → TP4056 BAT-
+503035 LiPo Battery (+) → TP4056 BAT+
+503035 LiPo Battery (-) → TP4056 BAT-
 
-TP4056 OUT+ → Toggle Switch → Split to both boost converters IN+
-TP4056 OUT- → Both boost converters IN-
+TP4056 OUT+ → Toggle Switch → Boost Converter IN+
+TP4056 OUT- → Boost Converter IN-
 
-Boost Converter #1 (5V for ESP32):
-  OUT+ (adjusted to 5V) → ESP32 5V/VIN pin
+Boost Converter (5V for ESP32):
+  OUT+ (adjusted to 5V) → ESP32 VIN
   OUT- (GND) → ESP32 GND
 
-Boost Converter #2 (12V for LED):
-  OUT+ (adjusted to 12V) → Transistor Collector
-  OUT- (GND) → Common Ground
+Power Indicator LED:
+  TP4056 OUT+ (after switch) → 1kΩ Resistor → Power LED (+)
+  Power LED (-) → Common Ground
+
+Battery Voltage Monitor:
+  TP4056 OUT+ → 47kΩ → ESP32 GPIO1 → 47kΩ → GND
+  (Voltage divider for battery level sensing)
 ```
 
 ⚠️ **CRITICAL**: All grounds must be connected together!
+⚠️ **NOTE**: Use GPIO1 for battery monitoring, NOT GPIO0 (boot strapping pin)
+
+### OLED Display (I2C)
+```
+ESP32 GPIO6 (SDA) → OLED SDA
+ESP32 GPIO7 (SCL) → OLED SCL
+ESP32 3.3V → OLED VCC
+ESP32 GND → OLED GND
+```
+
+⚠️ **CRITICAL**: Use 3.3V for OLED, NOT 5V!
+
+### Speaker (3W 8Ω Audio)
+```
+ESP32 GPIO8 → Speaker + (Positive)
+ESP32 GND → Speaker - (Negative)
+```
+
+No amplifier needed - ESP32 can drive 3W speaker directly via PWM.
 
 ### Button Input Circuit
 ```
 Arcade Button:
   NO (Normally Open) → ESP32 3.3V
   COM (Common) → ESP32 GPIO15
-  
+
 10kΩ Pull-down Resistor:
   One end → ESP32 GPIO15
   Other end → ESP32 GND
 ```
 
-### LED Control Circuit
+The button uses internal pull-down configuration with external 10kΩ resistor for reliability.
+
+### LED Control Circuit (Optional - for Arcade Button Illumination)
 ```
-ESP32 GPIO4 → 1kΩ Resistor → Transistor Base (B)
-Transistor Emitter (E) → Button LED (-)
-Button LED (+) → Boost Converter #2 OUT+ (12V)
-Transistor Collector (C) → Boost Converter #2 OUT- (GND)
+Boost Converter #2 (12V for LED):
+  IN+ → TP4056 OUT+ (after switch)
+  IN- → TP4056 OUT-
+  OUT+ (adjusted to 12V) → 2N2222 Collector
+
+ESP32 GPIO4 → 1kΩ Resistor → 2N2222 Base
+2N2222 Emitter → 330Ω Resistor → Button LED (+)
+Button LED (-) → GND
 ```
 
 ### Charging Port
@@ -68,16 +129,17 @@ USB GND → TP4056 IN-
 
 ## ⚙️ Boost Converter Setup
 
-**BEFORE connecting to ESP32 or LED, adjust the boost converters!**
+**BEFORE connecting to ESP32 or LED, adjust the boost converter(s)!**
 
-### Boost Converter #1 (ESP32 Power)
+### Boost Converter (ESP32 Power) - REQUIRED
 1. Connect input to a 3.7V source (or the battery)
 2. Connect a multimeter to the output
 3. Use a small screwdriver to adjust the potentiometer
 4. Set output to exactly **5.0V**
 5. Mark this converter "ESP32 - 5V"
 
-### Boost Converter #2 (LED Power)
+### Boost Converter #2 (LED Power) - OPTIONAL
+Only needed if you want to illuminate the arcade button LED:
 1. Connect input to a 3.7V source
 2. Connect a multimeter to the output
 3. Adjust potentiometer to **12V** (or 5V if your button LED is 5V)
@@ -87,12 +149,24 @@ USB GND → TP4056 IN-
 
 ## 📚 Required Arduino Libraries
 
-Install these via Library Manager:
-- **ESP32 Board Support** (same as base station)
+Install these libraries via Arduino IDE Library Manager:
+
+1. **ESP32 Board Support**
+   - Go to File → Preferences
+   - Add to Additional Board Manager URLs:
+     ```
+     https://espressif.github.io/arduino-esp32/package_esp32_index.json
+     ```
+   - Tools → Board → Board Manager → Search "esp32" → Install
+
+2. **Adafruit GFX Library** (by Adafruit) - for OLED display
+3. **Adafruit SSD1306** (by Adafruit) - for OLED display
+4. **Adafruit BusIO** (dependency, should auto-install)
 
 Built-in libraries (no installation needed):
 - esp_now
 - WiFi
+- Wire (I2C for OLED)
 
 ## 🚀 Installation Steps
 
@@ -145,34 +219,103 @@ Base Station MAC Address: AA:BB:CC:DD:EE:FF
 1. Plug micro-USB cable into TP4056 module
 2. Red LED = Charging
 3. Blue/Green LED = Fully charged
-4. Charging time: ~2-4 hours for typical 2000mAh battery
+4. Charging time: ~1 hour for 503035 500mAh battery
 
 ### Battery Life
-Expected runtime (approximate):
-- **Idle/waiting**: 8-12 hours
-- **Active use** (frequent presses): 4-6 hours
+Expected runtime (approximate with 503035 500mAh battery):
+- **Idle/waiting**: 4-6 hours
+- **Active use** (frequent presses): 2-3 hours
 
-💡 **Tip**: Implement deep sleep (see customization section) for much longer battery life.
+💡 **Tip**: Implement deep sleep (see customization section) for much longer battery life. The compact 503035 battery is ideal for portable use while keeping the unit small and lightweight.
 
 ### Safety
-- ✅ Use protected 18650 cells (with built-in protection circuit)
+- ✅ Use quality LiPo batteries from reputable sources
 - ✅ TP4056 provides overcharge/overdischarge protection
 - ❌ Don't leave charging unattended for extended periods
 - ❌ Don't use damaged or swollen batteries
+- ❌ LiPo batteries are sensitive - handle with care
 
 ## 🎮 Button Operation
 
 ### Power On
 1. Flip toggle switch to ON
-2. Button LED should blink twice (indicates ready)
-3. Press button to test - should blink briefly
+2. Built-in LED blinks twice (indicates ready)
+3. Startup melody plays on speaker
+4. OLED display shows connection status
 
-### States
-- **Waiting**: LED off, game not started
-- **Ready**: LED off, game started, waiting for press
-- **Pressed**: LED flashes briefly when you press
-- **Winner**: LED stays on solid
-- **Locked Out**: LED stays off after someone else buzzed
+### Display States
+
+#### Connected (Team Name Received)
+```
+┌──────────────────┐
+│ Team Alpha   85% │  ← Battery indicator
+│                  │
+│  Ready to play!  │
+└──────────────────┘
+```
+
+#### Disconnected (Not Configured)
+```
+┌──────────────────┐
+│ A4:B2:31:F0  72% │  ← MAC address + battery
+│ HB:OK M:5        │  ← Heartbeat status
+│ Btn:3 Sent:8     │  ← Debug counters
+└──────────────────┘
+```
+
+#### Game Ready
+```
+┌──────────────────┐
+│ Team Alpha   85% │
+│                  │
+│     READY!       │  ← Large text
+│   Press now!     │
+└──────────────────┘
+```
+
+#### Winner
+```
+┌──────────────────┐
+│ Team Alpha   85% │
+│                  │
+│    WINNER!       │  ← Large text
+│  You got it!     │
+└──────────────────┘
+```
+
+### Audio Feedback
+
+The button plays different sounds for each state:
+- **Startup**: Ascending melody (C-E-G-C)
+- **Game Ready**: Single beep (600Hz, 200ms)
+- **Button Press**: Descending buzz (800-600-400Hz)
+- **Winner**: Victory fanfare (800Hz → 1000Hz)
+- **Locked Out**: Sad descending tone (400-300-200Hz)
+- **Invalid Press**: Low error tone (200Hz)
+
+Audio can be individually muted per team from the base station web interface.
+
+### LED Status Patterns
+
+Built-in status LED (GPIO2):
+- **Waiting**: Slow pulse every 3 seconds
+- **Ready**: Fast blink (500ms on/off)
+- **Winner**: Solid on
+- **Locked Out**: Off
+
+### Battery Monitoring
+
+- Battery percentage shown in top-right of display
+- Updates every 30 seconds
+- Voltage range: 3.0V (0%) to 4.2V (100%)
+- LiPo discharge curve calculated automatically
+
+### Heartbeat System
+
+- Button sends heartbeat every 10 seconds
+- Base station responds with team name and game status
+- Automatic team name synchronization
+- Connection status shown on OLED
 
 ### Power Off
 Flip toggle switch to OFF when not in use to conserve battery.
@@ -184,32 +327,56 @@ Flip toggle switch to OFF when not in use to conserve battery.
 **Check MAC Address**
 - Verify button MAC is correctly entered in base station config
 - MAC addresses are case-insensitive but must match exactly
+- Check OLED display - should show team name when configured
 
 **Check Game State**
 - Game must be started on base station
+- OLED should show "READY!" when game is active
 - Serial Monitor should show "Button pressed - sending buzz"
 
 **Check ESP-NOW Connection**
+- OLED shows heartbeat status (HB:OK or HB:X)
 - Serial Monitor shows "Send Status: Success" or "Fail"
-- If "Fail", check base station MAC address in code
+- If "Fail", check base station MAC address in button-secret.h
 
-### LED Not Working
+### OLED Display Issues
 
-**Check LED Voltage**
-- Measure boost converter output with multimeter
-- Should be 12V (or 5V depending on your button)
+**Blank Display**
+- Check I2C wiring: SDA→GPIO6, SCL→GPIO7
+- Verify 3.3V power (NOT 5V - will damage display!)
+- Try I2C scanner sketch to detect address
+- Default address is 0x3C, some use 0x3D
 
-**Check Transistor**
-- With button pressed and winner, measure transistor emitter voltage
-- Should be close to 0V when LED should be on
-- If not, check GPIO4 output and transistor connections
+**Garbled Display**
+- Check loose connections
+- Verify stable 3.3V power supply
+- Ensure common ground with ESP32
 
-**Check LED Polarity**
-- Button LED has + and - terminals
-- LED + should go to boost converter +
-- LED - should go to transistor emitter
+**Shows MAC but No Team Name**
+- Button not configured in base station yet
+- Check base station web interface configuration
+- Verify heartbeat communication (HB:OK on display)
+
+### Speaker/Audio Issues
+
+**No Sound**
+- Check speaker wiring to GPIO8
+- Verify speaker polarity (shouldn't matter for PWM)
+- Test with different tone frequencies
+- Check if team is muted in base station config
+
+**Distorted Sound**
+- Speaker may be 4Ω instead of 8Ω (still works)
+- Check for loose connections
+- PWM frequency may need adjustment
 
 ### Battery Issues
+
+**Battery Percentage Shows 0% or Wrong Value**
+- Check voltage divider: 47kΩ → GPIO1 → 47kΩ → GND
+- Verify using GPIO1, NOT GPIO0 (boot strapping pin)
+- Measure actual battery voltage with multimeter
+- Should read ~1.85V at GPIO1 for 3.7V battery
 
 **Won't Charge**
 - Check TP4056 red LED comes on when USB plugged in
@@ -217,25 +384,43 @@ Flip toggle switch to OFF when not in use to conserve battery.
 - Check battery isn't over-discharged (should be >2.5V)
 
 **Drains Quickly**
-- Check for short circuits
-- Verify ESP32 isn't constantly transmitting
-- Consider implementing deep sleep mode
+- Check for short circuits with multimeter
+- Verify ESP32 isn't constantly transmitting (check Serial Monitor)
+- OLED and speaker use power - normal runtime is 2-4 hours
+- Consider implementing deep sleep mode for longer life
 
 **Won't Power On**
 - Check toggle switch connections
 - Verify boost converter is set to 5V
 - Check battery voltage (should be 3.0-4.2V)
+- Measure 5V at ESP32 VIN pin
+
+### LED Issues (Optional Arcade Button LED)
+
+**LED Not Working**
+- Measure boost converter #2 output with multimeter (should be 12V)
+- Check transistor connections and orientation
+- Verify GPIO4 output with multimeter
+- Check LED polarity: + to boost, - to transistor
+
+**LED Too Dim/Bright**
+- Adjust boost converter voltage
+- Change 330Ω current limiting resistor
 
 ### Physical Button Issues
 
-**Button Doesn't Click**
+**Button Doesn't Click or Register**
 - Arcade buttons need firm pressure
 - Check button isn't jammed or damaged
+- Verify GPIO15 connection
+- Check 10kΩ pull-down resistor is connected
+- Serial Monitor should show BtnPress counter incrementing
 
 **False Triggers**
-- Check 10kΩ pull-down resistor is connected
-- Verify button NO/COM connections
-- May need debouncing adjustment in code
+- Check 10kΩ pull-down resistor is connected properly
+- Verify button NO/COM connections (not NC!)
+- May need debouncing adjustment in code (currently 50ms)
+- Check for electrical noise from other components
 
 ## 📝 Customization
 
@@ -286,12 +471,26 @@ ESP-NOW uses encryption by default in Arduino implementation. For additional sec
 ## 💾 Code Structure
 
 Key functions:
-- `setup()` - Initializes ESP-NOW and button
-- `loop()` - Checks for button press, handles debouncing
+- `setup()` - Initializes ESP-NOW, I2C, OLED, speaker, and button
+- `loop()` - Checks for button press, sends heartbeats, updates display and battery
 - `buttonISR()` - Hardware interrupt for instant button detection
-- `onDataRecv()` - Receives status updates from base station
+- `onDataRecv()` - Receives status updates and team name from base station
+- `onDataSent()` - Callback for ESP-NOW transmission status
 - `sendBuzzer()` - Transmits button press via ESP-NOW
-- `setLED()` - Controls button LED state
+- `sendHeartbeat()` - Sends periodic heartbeat to base station
+- `updateDisplay()` - Updates OLED with current state, team name, and battery
+- `setStatusLED()` - Controls built-in status LED (GPIO2)
+- `showStatePattern()` - Displays LED patterns based on game state
+- `playTone()` - Generates PWM audio tones on speaker
+- `playBuzzSound()` - Button press audio feedback
+- `playWinnerSound()` - Victory fanfare
+- `playLockoutSound()` - Lockout tone
+- `playReadySound()` - Game ready beep
+- `playStartupSound()` - Boot melody
+- `readBatteryVoltage()` - Reads ADC from voltage divider (GPIO1)
+- `calculateBatteryPercent()` - Converts voltage to percentage
+- `updateBatteryLevel()` - Updates battery display
+- `drawBatteryIcon()` - Draws battery indicator on OLED
 
 ## 📦 Enclosure Recommendations
 
@@ -309,13 +508,19 @@ Mount considerations:
 ## 🧪 Testing Checklist
 
 Before final assembly:
-- [ ] Boost converters set to correct voltages
-- [ ] Button press registers in Serial Monitor
-- [ ] LED lights up on button press
-- [ ] ESP-NOW communication successful
-- [ ] Battery charges properly (TP4056 LED indicators)
+- [ ] Boost converter set to 5.0V (measure with multimeter)
+- [ ] OLED display initializes and shows MAC address
+- [ ] Speaker plays startup melody on power-on
+- [ ] Button press registers in Serial Monitor (BtnPress counter increments)
+- [ ] Built-in status LED blinks on power-up
+- [ ] Battery percentage displays correctly on OLED
+- [ ] ESP-NOW communication successful (HB:OK on display)
+- [ ] Team name appears on OLED after base station configuration
+- [ ] All game state sounds play correctly (ready, buzz, winner, lockout)
+- [ ] Battery charges properly (TP4056 LED indicators: red=charging, blue/green=full)
 - [ ] Toggle switch cuts power completely
-- [ ] No short circuits (check with multimeter)
+- [ ] No short circuits (check all power rails with multimeter)
+- [ ] Optional: Arcade button LED lights up (if using LED control circuit)
 
 ## 🆘 Getting Help
 

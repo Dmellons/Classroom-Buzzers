@@ -52,26 +52,34 @@ A professional quiz buzzer system built with ESP32-C6 microcontrollers, featurin
 ## 📁 Repository Structure
 
 ```
-esp32-quiz-buzzer/
-├── base-station/           # Base station code
-│   ├── base-station.ino
-│   ├── secret.h
-│   └── README.md
-├── button/                 # Button unit code
-│   ├── button.ino
-│   ├── secret.h
-│   └── README.md
-├── wiring-diagrams/        # Detailed wiring guides
-│   └── diagrams.md
-├── LICENSE
-└── README.md              # This file
+Classroom Buzzers/
+├── base-station/              # Base station code
+│   ├── base-station.ino       # Main base station firmware
+│   ├── base-secret.h          # WiFi credentials (create from template)
+│   └── README.md              # Base station setup guide
+├── button/                    # Button unit code
+│   ├── button.ino             # Main button firmware
+│   ├── button-secret.h        # Base station MAC (create from template)
+│   └── README.md              # Button unit setup guide
+├── debug/                     # Debug utilities
+│   └── debug.ino              # Hardware diagnostic tool
+├── tests/                     # Test utilities
+│   └── blink-test/
+│       └── blink-test.ino     # Basic LED blink test
+├── components-list.md         # Complete hardware BOM and wiring
+├── button-wiring-guide.md     # Detailed button wiring guide
+├── breadboard-button-guide.md # Simplified breadboard setup
+├── speaker-wiring-guide.md    # Audio system wiring
+├── CLAUDE.md                  # Development guide for AI assistance
+├── LICENSE                    # MIT License
+└── README.md                  # This file
 ```
 
-## secret.h
+## Secret Configuration Files
 
-This file contains sensitive information, such as WiFi credentials and MAC addresses. It should not be committed to version control.
+These files contain sensitive information (WiFi credentials and MAC addresses) and should not be committed to version control.
 
-You will need to create 2 files called `secret.h` and `secret.h` in the `base-station` and `button` directories, respectively. These files should contain the following lines:
+You will need to create two secret files - one for the base station and one for each button unit:
 
 ### base-station/base-secret.h
 ```cpp
@@ -116,7 +124,9 @@ You will need to create 2 files called `secret.h` and `secret.h` in the `base-st
 
 - **[Base Station Setup](base-station/README.md)** - Detailed wiring, code setup, and troubleshooting
 - **[Button Setup](button/README.md)** - Button assembly, battery management, and configuration
-- **[Wiring Diagrams](wiring-diagrams/diagrams.md)** - Complete schematics for all components
+- **[Components List](components-list.md)** - Complete hardware BOM and pin assignments
+- **[Button Wiring Guide](button-wiring-guide.md)** - Detailed wiring for battery-powered buttons
+- **[Breadboard Guide](breadboard-button-guide.md)** - Simplified USB-powered setup for testing
 
 ## 🔧 Troubleshooting
 

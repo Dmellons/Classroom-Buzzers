@@ -23,6 +23,25 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define SD_SCK 18
 #define SD_CS 5
 
+// Physical button pins
+#define BTN_START_STOP 10  // GPIO10 - Start/Stop game (with internal pull-up)
+#define BTN_RESET 1        // GPIO1 - Reset round (with internal pull-up)
+
+// Timing constants
+#define HEARTBEAT_TIMEOUT_MS 30000      // Mark button offline after 30 seconds
+#define DISPLAY_CYCLE_INTERVAL_MS 2000  // Cycle through teams every 2 seconds
+#define DEBOUNCE_DELAY_MS 250           // Button debounce delay
+
+// Message protocol constants
+#define MESSAGE_SIZE 32                 // ESP-NOW message size
+#define TEAM_NAME_MAX_LENGTH 29         // Max team name in message (+ null terminator)
+
+// Game status codes (sent to buttons)
+#define STATUS_GAME_STOPPED 0
+#define STATUS_WINNER 1
+#define STATUS_LOCKED_OUT 2
+#define STATUS_GAME_READY 3
+
 // WiFi credentials from secret file
 const char* ap_ssid = WIFI_SSID;
 const char* ap_password = WIFI_PASSWORD;
@@ -39,8 +58,14 @@ unsigned long winnerTime = 0;
 // Audio settings
 bool audioMuted = false;
 
+// Button debounce variables
+unsigned long lastBtnStartStopPress = 0;
+unsigned long lastBtnResetPress = 0;
+bool lastBtnStartStopState = HIGH;
+bool lastBtnResetState = HIGH;
+
 // Team configuration
-#define MAX_TEAMS 4
+#define MAX_TEAMS 9  // Maximum number of teams (can be 1-9)
 struct Team {
   String name;
   uint8_t mac[6];
@@ -54,6 +79,79 @@ Team teams[MAX_TEAMS];
 
 // SD card available flag
 bool sdCardAvailable = false;
+
+// HTML escape function to prevent XSS attacks
+String escapeHtml(String input) {
+  input.replace("&", "&amp;");
+  input.replace("<", "&lt;");
+  input.replace(">", "&gt;");
+  input.replace("\"", "&quot;");
+  input.replace("'", "&#39;");
+  return input;
+}
+
+// Helper function to build and send status message to a specific team
+// Message format:
+//   Byte 0: Status code (0=stopped, 1=winner, 2=locked, 3=ready)
+//   Byte 1: Mute flag (0=unmuted, 1=muted)
+//   Bytes 2-3: Response time in ms (uint16_t, little-endian) - only valid for winner
+//   Bytes 4-31: Team name (up to 27 chars + null terminator)
+void sendStatusMessageToTeam(int teamIndex) {
+  if (teamIndex < 0 || teamIndex >= MAX_TEAMS || !teams[teamIndex].isConfigured) {
+    return;
+  }
+
+  uint8_t message[MESSAGE_SIZE];
+  memset(message, 0, sizeof(message));
+
+  // Determine current game status for this team
+  if (!gameActive) {
+    message[0] = STATUS_GAME_STOPPED;
+  } else if (winnerTeam == -1) {
+    message[0] = STATUS_GAME_READY;
+  } else if (winnerTeam == teamIndex) {
+    message[0] = STATUS_WINNER;
+  } else {
+    message[0] = STATUS_LOCKED_OUT;
+  }
+
+  // Add individual mute flag at byte 1 (individual team mute OR global mute)
+  message[1] = (audioMuted || teams[teamIndex].isMuted) ? 1 : 0;
+
+  // Add response time at bytes 2-3 (uint16_t, little-endian)
+  // Only meaningful for winner, but we send it anyway for simplicity
+  uint16_t responseTimeMs = (winnerTime > 65535) ? 65535 : (uint16_t)winnerTime;
+  message[2] = responseTimeMs & 0xFF;         // Low byte
+  message[3] = (responseTimeMs >> 8) & 0xFF;  // High byte
+
+  // Add team name starting at byte 4 (max 27 chars + null terminator)
+  String teamName = teams[teamIndex].name;
+  if (teamName.length() > 27) {
+    teamName = teamName.substring(0, 27);
+  }
+  strcpy((char*)&message[4], teamName.c_str());
+
+  // Debug: Print what we're about to send
+  Serial.printf("Sending to Team %d (%s): status=%d, muted=%d\n",
+    teamIndex + 1, teams[teamIndex].name.c_str(), message[0], message[1]);
+
+  // Add button as peer if not already added
+  esp_now_peer_info_t peerInfo;
+  memset(&peerInfo, 0, sizeof(peerInfo));
+  memcpy(peerInfo.peer_addr, teams[teamIndex].mac, 6);
+  peerInfo.channel = 1;  // Must match AP channel
+  peerInfo.encrypt = false;
+  peerInfo.ifidx = WIFI_IF_AP;  // Use AP interface
+
+  if (!esp_now_is_peer_exist(teams[teamIndex].mac)) {
+    esp_err_t addResult = esp_now_add_peer(&peerInfo);
+    Serial.printf("Adding peer: %s\n", (addResult == ESP_OK) ? "SUCCESS" : "FAILED");
+  }
+
+  // Send message
+  esp_err_t sendResult = esp_now_send(teams[teamIndex].mac, message, sizeof(message));
+  Serial.printf("Send result: %s\n", (sendResult == ESP_OK) ? "OK" : "ERROR");
+}
 
 void setup() {
   Serial.begin(115200);
@@ -105,8 +203,9 @@ void setup() {
   // Start WiFi Access Point with ESP-NOW support
   WiFi.mode(WIFI_AP_STA);  // Need STA mode for ESP-NOW
   delay(100);
-  
-  if (WiFi.softAP(ap_ssid, ap_password)) {
+
+  // Set WiFi AP on channel 1 for ESP-NOW compatibility
+  if (WiFi.softAP(ap_ssid, ap_password, 1)) {
     // WiFi started successfully
     display.clearDisplay();
     display.setCursor(0, 0);
@@ -152,6 +251,15 @@ void setup() {
   server.on("/unmute-team", handleUnmuteTeam);
   server.begin();
   
+  // Initialize physical buttons with pull-up resistors
+  pinMode(BTN_START_STOP, INPUT_PULLUP);
+  pinMode(BTN_RESET, INPUT_PULLUP);
+
+  // Read initial button states to prevent false triggers at boot
+  delay(50); // Small delay to let pins settle
+  lastBtnStartStopState = digitalRead(BTN_START_STOP);
+  lastBtnResetState = digitalRead(BTN_RESET);
+
   // Blink LED to show ready
   pinMode(LED_BUILTIN, OUTPUT);
   for (int i = 0; i < 3; i++) {
@@ -160,24 +268,27 @@ void setup() {
     digitalWrite(LED_BUILTIN, LOW);
     delay(200);
   }
-  
+
   // Show normal interface after initialization
   updateDisplay();
 }
 
 void loop() {
   server.handleClient();
-  
+
+  // Handle physical button presses
+  handlePhysicalButtons();
+
   // Check for button timeouts (mark offline if not seen recently)
   unsigned long currentTime = millis();
   for (int i = 0; i < MAX_TEAMS; i++) {
     if (teams[i].isConfigured && teams[i].isOnline) {
-      if (currentTime - teams[i].lastSeen > 30000) { // 30 second timeout
+      if (currentTime - teams[i].lastSeen > HEARTBEAT_TIMEOUT_MS) {
         teams[i].isOnline = false;
       }
     }
   }
-  
+
   delay(2);
 }
 
@@ -240,6 +351,10 @@ void handleButtonPress(int teamIndex) {
   updateDisplay();
 }
 
+// Display cycling variables
+unsigned long lastDisplayUpdate = 0;
+int currentDisplayTeam = 0;
+
 void updateDisplay() {
   display.clearDisplay();
   display.setTextSize(1);
@@ -260,26 +375,56 @@ void updateDisplay() {
       display.println("Waiting for buzz...");
     }
   } else {
-    if (sdCardAvailable) {
-      display.println("Quiz Buzzer System");
-      display.println("[Config Saved]");
-    } else {
-      display.println("Quiz Buzzer System");
-      display.println("[No SD Card]");
+    // Count connected teams
+    int connectedCount = 0;
+    for (int i = 0; i < MAX_TEAMS; i++) {
+      if (teams[i].isConfigured && teams[i].isOnline) {
+        connectedCount++;
+      }
     }
     
-    display.println();
-    display.printf("WiFi: %s\n", ap_ssid);
+    // Always show WiFi info
+    display.printf("SSID: %s\n", ap_ssid);
     display.printf("IP: %s\n", WiFi.softAPIP().toString().c_str());
+    display.printf("Teams: %d/%d\n", connectedCount, MAX_TEAMS);
     display.println();
     
-    display.println("Teams:");
-    for (int i = 0; i < MAX_TEAMS; i++) {
-      display.printf("%d. %s", i + 1, teams[i].name.c_str());
-      if (teams[i].isConfigured && teams[i].isOnline) {
-        display.print(" *");
+    if (connectedCount > 0) {
+      // Cycle through connected teams
+      unsigned long currentTime = millis();
+      if (currentTime - lastDisplayUpdate >= DISPLAY_CYCLE_INTERVAL_MS) {
+        lastDisplayUpdate = currentTime;
+        
+        // Find next connected team
+        int startTeam = currentDisplayTeam;
+        do {
+          currentDisplayTeam = (currentDisplayTeam + 1) % MAX_TEAMS;
+        } while (!teams[currentDisplayTeam].isConfigured || !teams[currentDisplayTeam].isOnline);
+        
+        // Prevent infinite loop if no teams connected
+        if (currentDisplayTeam == startTeam && (!teams[currentDisplayTeam].isConfigured || !teams[currentDisplayTeam].isOnline)) {
+          currentDisplayTeam = 0;
+        }
       }
-      display.println();
+      
+      // Display current team info
+      if (teams[currentDisplayTeam].isConfigured && teams[currentDisplayTeam].isOnline) {
+        display.setTextSize(2);
+        display.printf("Team %d\n", currentDisplayTeam + 1);
+        display.println(teams[currentDisplayTeam].name);
+        display.setTextSize(1);
+        display.printf("MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", 
+                      teams[currentDisplayTeam].mac[0], teams[currentDisplayTeam].mac[1], 
+                      teams[currentDisplayTeam].mac[2], teams[currentDisplayTeam].mac[3], 
+                      teams[currentDisplayTeam].mac[4], teams[currentDisplayTeam].mac[5]);
+        if (teams[currentDisplayTeam].isMuted) {
+          display.println("MUTED");
+        }
+      }
+    } else {
+      display.println("No teams connected");
+      display.println("Configure teams via");
+      display.println("web interface");
     }
   }
   
@@ -300,7 +445,7 @@ void handleRoot() {
   
   if (gameActive) {
     if (winnerTeam >= 0) {
-      html += "<h2 class='winner'>WINNER: " + teams[winnerTeam].name + "!</h2>";
+      html += "<h2 class='winner'>WINNER: " + escapeHtml(teams[winnerTeam].name) + "!</h2>";
       html += "<p><strong>Response Time:</strong> " + String(winnerTime) + " ms</p>";
       html += "<button onclick=\"location.href='/reset'\">RESET ROUND</button>";
     } else {
@@ -340,7 +485,7 @@ void handleRoot() {
     html += "<div style='background:#f0f0f0;padding:10px;margin:10px 0;border-radius:5px;'>";
     html += "<h4>Team " + String(i + 1) + "</h4>";
     
-    html += "<p>Name: <input type='text' name='team" + String(i) + "' value='" + teams[i].name + "' maxlength='20' style='width:200px;'></p>";
+    html += "<p>Name: <input type='text' name='team" + String(i) + "' value='" + escapeHtml(teams[i].name) + "' maxlength='20' style='width:200px;'></p>";
     
     html += "<p>Button MAC: <input type='text' name='mac" + String(i) + "' value='";
     for (int j = 0; j < 6; j++) {
@@ -350,7 +495,7 @@ void handleRoot() {
       hexByte.toUpperCase();
       html += hexByte;
     }
-    html += "' placeholder='AA:BB:CC:DD:EE:FF' style='width:200px;'></p>";
+    html += "' placeholder='AA:BB:CC:DD:EE:FF' pattern='([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' title='MAC address format: AA:BB:CC:DD:EE:FF' style='width:200px;'></p>";
     
     html += "<p>Status: ";
     if (teams[i].isConfigured) {
@@ -374,7 +519,7 @@ void handleRoot() {
   
   for (int i = 0; i < MAX_TEAMS; i++) {
     html += "<tr><td style='border:1px solid #ccc;padding:8px;'>" + String(i + 1) + "</td>";
-    html += "<td style='border:1px solid #ccc;padding:8px;'>" + teams[i].name + "</td>";
+    html += "<td style='border:1px solid #ccc;padding:8px;'>" + escapeHtml(teams[i].name) + "</td>";
     html += "<td style='border:1px solid #ccc;padding:8px;'>";
     
     if (teams[i].isConfigured) {
@@ -574,74 +719,121 @@ void handleSave() {
 
 void saveConfig() {
   if (!sdCardAvailable) return;
-  
-  File configFile = SD.open("/config.txt", FILE_WRITE);
-  if (configFile) {
-    configFile.println(MAX_TEAMS);
-    for (int i = 0; i < MAX_TEAMS; i++) {
-      configFile.println(teams[i].name);
-      // Save MAC address as hex values separated by commas
-      for (int j = 0; j < 6; j++) {
-        configFile.print(teams[i].mac[j], HEX);
-        if (j < 5) configFile.print(",");
-      }
-      configFile.println();
-      configFile.println(teams[i].isConfigured ? "1" : "0");
-      configFile.println(teams[i].isMuted ? "1" : "0");
-    }
-    configFile.close();
+
+  Serial.println("=== Saving Configuration to SD Card ===");
+
+  // Delete old config file to ensure clean write (not append)
+  if (SD.exists("/config.txt")) {
+    Serial.println("Deleting old config.txt...");
+    SD.remove("/config.txt");
   }
+
+  // Open file in write mode
+  File configFile = SD.open("/config.txt", FILE_WRITE);
+  if (!configFile) {
+    Serial.println("ERROR: Failed to open config.txt for writing!");
+    return;
+  }
+
+  Serial.println("Writing configuration data...");
+  configFile.println(MAX_TEAMS);
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    configFile.println(teams[i].name);
+    // Save MAC address as hex values separated by commas
+    for (int j = 0; j < 6; j++) {
+      configFile.print(teams[i].mac[j], HEX);
+      if (j < 5) configFile.print(",");
+    }
+    configFile.println();
+    configFile.println(teams[i].isConfigured ? "1" : "0");
+    configFile.println(teams[i].isMuted ? "1" : "0");
+
+    Serial.printf("  Team %d: %s (%s)\n", i + 1, teams[i].name.c_str(),
+                  teams[i].isConfigured ? "configured" : "not configured");
+  }
+
+  // CRITICAL: Flush data to SD card before closing
+  configFile.flush();
+  Serial.println("Flushed data to SD card");
+
+  configFile.close();
+  Serial.println("=== Configuration Saved Successfully ===");
 }
 
 void loadConfig() {
-  if (!sdCardAvailable) return;
-  
-  File configFile = SD.open("/config.txt");
-  if (configFile) {
-    int numTeams = configFile.readStringUntil('\n').toInt();
-    if (numTeams == MAX_TEAMS) {
-      for (int i = 0; i < MAX_TEAMS; i++) {
-        // Load team name
-        String teamName = configFile.readStringUntil('\n');
-        teamName.trim();
-        if (teamName.length() > 0 && teamName.length() <= 20) {
-          teams[i].name = teamName;
-        }
-        
-        // Load MAC address
-        String macLine = configFile.readStringUntil('\n');
-        macLine.trim();
-        if (macLine.length() > 0) {
-          int macIndex = 0;
-          int startPos = 0;
-          for (int j = 0; j < 6 && macIndex < 6; j++) {
-            int commaPos = macLine.indexOf(',', startPos);
-            if (commaPos == -1 && j == 5) commaPos = macLine.length();
-            
-            if (commaPos != -1) {
-              String byteStr = macLine.substring(startPos, commaPos);
-              teams[i].mac[macIndex] = strtol(byteStr.c_str(), NULL, 16);
-              macIndex++;
-              startPos = commaPos + 1;
-            }
+  if (!sdCardAvailable) {
+    Serial.println("SD card not available, cannot load config");
+    return;
+  }
+
+  Serial.println("=== Loading Configuration from SD Card ===");
+
+  if (!SD.exists("/config.txt")) {
+    Serial.println("config.txt does not exist - using defaults");
+    return;
+  }
+
+  File configFile = SD.open("/config.txt", FILE_READ);
+  if (!configFile) {
+    Serial.println("ERROR: Failed to open config.txt for reading!");
+    return;
+  }
+
+  int numTeams = configFile.readStringUntil('\n').toInt();
+  Serial.printf("Config file has %d teams, MAX_TEAMS = %d\n", numTeams, MAX_TEAMS);
+
+  if (numTeams == MAX_TEAMS) {
+    for (int i = 0; i < MAX_TEAMS; i++) {
+      // Load team name
+      String teamName = configFile.readStringUntil('\n');
+      teamName.trim();
+      if (teamName.length() > 0 && teamName.length() <= 20) {
+        teams[i].name = teamName;
+      }
+
+      // Load MAC address
+      String macLine = configFile.readStringUntil('\n');
+      macLine.trim();
+      if (macLine.length() > 0) {
+        int macIndex = 0;
+        int startPos = 0;
+        for (int j = 0; j < 6 && macIndex < 6; j++) {
+          int commaPos = macLine.indexOf(',', startPos);
+          if (commaPos == -1 && j == 5) commaPos = macLine.length();
+
+          if (commaPos != -1) {
+            String byteStr = macLine.substring(startPos, commaPos);
+            teams[i].mac[macIndex] = strtol(byteStr.c_str(), NULL, 16);
+            macIndex++;
+            startPos = commaPos + 1;
           }
         }
-        
-        // Load configuration status
-        String configStr = configFile.readStringUntil('\n');
-        teams[i].isConfigured = (configStr.toInt() == 1);
-        
-        // Load mute flag (if available, default to false for older config files)
-        if (configFile.available()) {
-          String muteStr = configFile.readStringUntil('\n');
-          teams[i].isMuted = (muteStr.toInt() == 1);
-        } else {
-          teams[i].isMuted = false;
-        }
       }
+
+      // Load configuration status
+      String configStr = configFile.readStringUntil('\n');
+      teams[i].isConfigured = (configStr.toInt() == 1);
+
+      // Load mute flag (if available, default to false for older config files)
+      if (configFile.available()) {
+        String muteStr = configFile.readStringUntil('\n');
+        teams[i].isMuted = (muteStr.toInt() == 1);
+      } else {
+        teams[i].isMuted = false;
+      }
+
+      Serial.printf("  Loaded Team %d: %s, MAC: %02X:%02X:%02X:%02X:%02X:%02X (%s)\n",
+                    i + 1, teams[i].name.c_str(),
+                    teams[i].mac[0], teams[i].mac[1], teams[i].mac[2],
+                    teams[i].mac[3], teams[i].mac[4], teams[i].mac[5],
+                    teams[i].isConfigured ? "configured" : "not configured");
     }
-    configFile.close();
+    Serial.println("=== Configuration Loaded Successfully ===");
+  } else {
+    Serial.println("ERROR: Team count mismatch! Config file may be corrupted.");
   }
+
+  configFile.close();
 }
 
 void initializeTeams() {
@@ -672,107 +864,87 @@ void parseMacAddress(String macStr, uint8_t* mac) {
 }
 
 void sendTeamStatusUpdate(int teamIndex) {
-  if (teamIndex < 0 || teamIndex >= MAX_TEAMS || !teams[teamIndex].isConfigured) {
-    return;
-  }
-  
-  uint8_t message[32]; // Message with team name
-  memset(message, 0, sizeof(message)); // Clear message buffer
-  
-  // Determine current game status for this team
-  if (!gameActive) {
-    message[0] = 0; // Game stopped
-  } else if (winnerTeam == -1) {
-    message[0] = 3; // Game active, ready
-  } else if (winnerTeam == teamIndex) {
-    message[0] = 1; // Winner
-  } else {
-    message[0] = 2; // Locked out
-  }
-  
-  // Add individual mute flag at byte 1 (individual team mute OR global mute)
-  message[1] = (audioMuted || teams[teamIndex].isMuted) ? 1 : 0;
-  
-  // Add team name starting at byte 2 (max 29 chars + null terminator)
-  String teamName = teams[teamIndex].name;
-  if (teamName.length() > 29) teamName = teamName.substring(0, 29);
-  strcpy((char*)&message[2], teamName.c_str());
-  
-  // Debug: Print what we're about to send
-  Serial.printf("Heartbeat response - Team %d (%s): Sending message %d\n",
-    teamIndex + 1, teams[teamIndex].name.c_str(), message[0]);
-  
-  // Add button as peer if not already added
-  esp_now_peer_info_t peerInfo;
-  memcpy(peerInfo.peer_addr, teams[teamIndex].mac, 6);
-  peerInfo.channel = 0;
-  peerInfo.encrypt = false;
-  
-  if (!esp_now_is_peer_exist(teams[teamIndex].mac)) {
-    esp_err_t addResult = esp_now_add_peer(&peerInfo);
-    Serial.printf("Adding peer: %s\n", (addResult == ESP_OK) ? "SUCCESS" : "FAILED");
-  }
-  
-  // Send message
-  esp_err_t sendResult = esp_now_send(teams[teamIndex].mac, message, sizeof(message));
-  Serial.printf("Team status update result: %s\n", (sendResult == ESP_OK) ? "OK" : "ERROR");
+  // Uses the common helper function to send status to a specific team
+  sendStatusMessageToTeam(teamIndex);
 }
 
 void sendButtonResponses() {
+  // Send status update to all configured teams using the common helper
   for (int i = 0; i < MAX_TEAMS; i++) {
     if (teams[i].isConfigured) {
-      uint8_t message[32]; // Increased size for team name
-      memset(message, 0, sizeof(message)); // Clear message buffer
-      
-      if (!gameActive) {
-        message[0] = 0; // Game stopped
-      } else if (winnerTeam == -1) {
-        message[0] = 3; // Game active, ready
-      } else if (winnerTeam == i) {
-        message[0] = 1; // Winner
-      } else {
-        message[0] = 2; // Locked out
-      }
-      
-      // Add individual mute flag at byte 1 (individual team mute OR global mute)
-      message[1] = (audioMuted || teams[i].isMuted) ? 1 : 0;
-      
-      // Add team name starting at byte 2 (max 29 chars + null terminator)
-      String teamName = teams[i].name;
-      if (teamName.length() > 29) teamName = teamName.substring(0, 29);
-      strcpy((char*)&message[2], teamName.c_str());
-      
-      // Debug: Print what we're about to send
-      Serial.printf("Team %d (%s): Sending message %d to %02X:%02X:%02X:%02X:%02X:%02X\n",
-        i + 1, teams[i].name.c_str(), message[0],
-        teams[i].mac[0], teams[i].mac[1], teams[i].mac[2],
-        teams[i].mac[3], teams[i].mac[4], teams[i].mac[5]);
-      
-      // Add button as peer if not already added
-      esp_now_peer_info_t peerInfo;
-      memcpy(peerInfo.peer_addr, teams[i].mac, 6);
-      peerInfo.channel = 0;
-      peerInfo.encrypt = false;
-      
-      if (!esp_now_is_peer_exist(teams[i].mac)) {
-        esp_err_t addResult = esp_now_add_peer(&peerInfo);
-        Serial.printf("Adding peer: %s\n", (addResult == ESP_OK) ? "SUCCESS" : "FAILED");
-      }
-      
-      // Send message
-      esp_err_t sendResult = esp_now_send(teams[i].mac, message, sizeof(message));
-      Serial.printf("esp_now_send result: %s\n", (sendResult == ESP_OK) ? "OK" : "ERROR");
+      sendStatusMessageToTeam(i);
     }
   }
 }
 
 void logBuzzerEvent(int teamIndex, unsigned long responseTime) {
   if (!sdCardAvailable) return;
-  
+
   File logFile = SD.open("/buzzer_log.txt", FILE_APPEND);
   if (logFile) {
     logFile.printf("%lu,%s,%lu\n", millis(), teams[teamIndex].name.c_str(), responseTime);
+    logFile.flush(); // Ensure data is written to SD card immediately
     logFile.close();
+    Serial.printf("Logged buzzer event: Team %s, Time: %lu ms\n", teams[teamIndex].name.c_str(), responseTime);
+  } else {
+    Serial.println("ERROR: Failed to open buzzer_log.txt for writing!");
   }
+}
+
+void handlePhysicalButtons() {
+  unsigned long currentTime = millis();
+
+  // Read current button states (active LOW with pull-up)
+  bool btnStartStopState = digitalRead(BTN_START_STOP);
+  bool btnResetState = digitalRead(BTN_RESET);
+
+  // Handle Start/Stop button
+  if (btnStartStopState == LOW && lastBtnStartStopState == HIGH) {
+    // Button just pressed (falling edge)
+    if (currentTime - lastBtnStartStopPress > DEBOUNCE_DELAY_MS) {
+      lastBtnStartStopPress = currentTime;
+
+      // Toggle game state
+      if (gameActive) {
+        // Stop the game
+        Serial.println("Physical button: STOP pressed");
+        gameActive = false;
+        winnerTeam = -1;
+        winnerTime = 0;
+        sendButtonResponses();
+      } else {
+        // Start the game
+        Serial.println("Physical button: START pressed");
+        gameActive = true;
+        winnerTeam = -1;
+        gameStartTime = millis();
+        winnerTime = 0;
+        sendButtonResponses();
+      }
+      updateDisplay();
+    }
+  }
+  lastBtnStartStopState = btnStartStopState;
+
+  // Handle Reset button
+  if (btnResetState == LOW && lastBtnResetState == HIGH) {
+    // Button just pressed (falling edge)
+    if (currentTime - lastBtnResetPress > DEBOUNCE_DELAY_MS) {
+      lastBtnResetPress = currentTime;
+
+      // Reset round
+      Serial.println("Physical button: RESET pressed");
+      winnerTeam = -1;
+      gameStartTime = millis();
+      winnerTime = 0;
+
+      // Only send responses if game is active
+      if (gameActive) {
+        sendButtonResponses();
+      }
+      updateDisplay();
+    }
+  }
+  lastBtnResetState = btnResetState;
 }
 
