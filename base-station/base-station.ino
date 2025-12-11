@@ -77,6 +77,16 @@ struct Team {
 
 Team teams[MAX_TEAMS];
 
+// Pending buttons (auto-discovered but not yet configured)
+#define MAX_PENDING 5
+struct PendingButton {
+  uint8_t mac[6];
+  unsigned long lastSeen;
+  bool active;
+};
+
+PendingButton pendingButtons[MAX_PENDING];
+
 // SD card available flag
 bool sdCardAvailable = false;
 
@@ -88,6 +98,89 @@ String escapeHtml(String input) {
   input.replace("\"", "&quot;");
   input.replace("'", "&#39;");
   return input;
+}
+
+// Initialize pending buttons array
+void initializePendingButtons() {
+  for (int i = 0; i < MAX_PENDING; i++) {
+    pendingButtons[i].active = false;
+    pendingButtons[i].lastSeen = 0;
+    memset(pendingButtons[i].mac, 0, 6);
+  }
+}
+
+// Check if MAC is already a configured team
+bool isConfiguredTeam(const uint8_t* mac) {
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (teams[i].isConfigured) {
+      bool match = true;
+      for (int j = 0; j < 6; j++) {
+        if (teams[i].mac[j] != mac[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return true;
+    }
+  }
+  return false;
+}
+
+// Check if MAC is already in pending list
+int findPendingButton(const uint8_t* mac) {
+  for (int i = 0; i < MAX_PENDING; i++) {
+    if (pendingButtons[i].active) {
+      bool match = true;
+      for (int j = 0; j < 6; j++) {
+        if (pendingButtons[i].mac[j] != mac[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return i;
+    }
+  }
+  return -1;
+}
+
+// Add button to pending list (auto-discovery)
+void addToPending(const uint8_t* mac) {
+  // Already in pending?
+  int existing = findPendingButton(mac);
+  if (existing >= 0) {
+    pendingButtons[existing].lastSeen = millis();
+    return;
+  }
+
+  // Find empty slot
+  for (int i = 0; i < MAX_PENDING; i++) {
+    if (!pendingButtons[i].active) {
+      memcpy(pendingButtons[i].mac, mac, 6);
+      pendingButtons[i].lastSeen = millis();
+      pendingButtons[i].active = true;
+      Serial.printf("Auto-discovered new button: %02X:%02X:%02X:%02X:%02X:%02X\n",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+      return;
+    }
+  }
+
+  // No empty slot - replace oldest
+  int oldest = 0;
+  for (int i = 1; i < MAX_PENDING; i++) {
+    if (pendingButtons[i].lastSeen < pendingButtons[oldest].lastSeen) {
+      oldest = i;
+    }
+  }
+  memcpy(pendingButtons[oldest].mac, mac, 6);
+  pendingButtons[oldest].lastSeen = millis();
+  pendingButtons[oldest].active = true;
+}
+
+// Format MAC address as string
+String formatMac(const uint8_t* mac) {
+  char buf[18];
+  sprintf(buf, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
 }
 
 // Helper function to build and send status message to a specific team
@@ -156,10 +249,11 @@ void sendStatusMessageToTeam(int teamIndex) {
 void setup() {
   Serial.begin(115200);
   Serial.println("Base Station Starting...");
-  
+
   // Initialize team structure with defaults
   initializeTeams();
-  
+  initializePendingButtons();
+
   // Initialize I2C
   Wire.begin(I2C_SDA, I2C_SCL);
   
@@ -241,6 +335,7 @@ void setup() {
   
   // Setup web server
   server.on("/", handleRoot);
+  server.on("/settings", handleSettings);
   server.on("/start", handleStart);
   server.on("/reset", handleReset);
   server.on("/stop", handleStop);
@@ -249,6 +344,9 @@ void setup() {
   server.on("/unmute", handleUnmute);
   server.on("/mute-team", handleMuteTeam);
   server.on("/unmute-team", handleUnmuteTeam);
+  server.on("/add-pending", handleAddPending);
+  server.on("/remove-team", handleRemoveTeam);
+  server.on("/api/status", handleApiStatus);
   server.begin();
   
   // Initialize physical buttons with pull-up resistors
@@ -300,7 +398,7 @@ void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 // ESP-NOW callback function for receiving button presses
 void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
   if (len < 1) return;
-  
+
   // Find which team this MAC address belongs to
   int teamIndex = -1;
   for (int i = 0; i < MAX_TEAMS; i++) {
@@ -320,11 +418,15 @@ void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData,
       }
     }
   }
-  
-  if (teamIndex == -1) return; // Unknown button
-  
+
+  // Unknown button - add to pending list for auto-discovery
+  if (teamIndex == -1) {
+    addToPending(recv_info->src_addr);
+    return;
+  }
+
   uint8_t messageType = incomingData[0];
-  
+
   if (messageType == 1) { // Button press
     handleButtonPress(teamIndex);
   } else if (messageType == 2) { // Heartbeat/status
@@ -431,139 +533,383 @@ void updateDisplay() {
   display.display();
 }
 
+// CSS styles shared between pages
+String getStyles() {
+  String css = "<style>";
+  css += "*{box-sizing:border-box;margin:0;padding:0;}";
+  css += "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#1a1a2e;color:#eee;min-height:100vh;}";
+  css += ".container{max-width:600px;margin:0 auto;padding:20px;}";
+  css += "h1{text-align:center;font-size:1.8em;margin-bottom:10px;color:#fff;}";
+  css += ".subtitle{text-align:center;color:#888;margin-bottom:20px;font-size:0.9em;}";
+  css += ".card{background:#16213e;border-radius:16px;padding:20px;margin-bottom:16px;box-shadow:0 4px 6px rgba(0,0,0,0.3);}";
+  css += ".btn{display:block;width:100%;padding:20px;font-size:1.3em;font-weight:bold;border:none;border-radius:12px;cursor:pointer;margin:10px 0;transition:transform 0.1s,box-shadow 0.1s;}";
+  css += ".btn:active{transform:scale(0.98);}";
+  css += ".btn-start{background:linear-gradient(135deg,#00b894,#00cec9);color:#fff;}";
+  css += ".btn-stop{background:linear-gradient(135deg,#e74c3c,#c0392b);color:#fff;}";
+  css += ".btn-reset{background:linear-gradient(135deg,#f39c12,#e67e22);color:#fff;}";
+  css += ".btn-settings{background:#2d3748;color:#a0aec0;font-size:1em;padding:15px;}";
+  css += ".btn-add{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;font-size:1em;padding:12px;}";
+  css += ".btn-mute{background:#4a5568;color:#fff;font-size:0.9em;padding:10px 15px;display:inline-block;width:auto;}";
+  css += ".status-bar{display:flex;justify-content:space-around;margin-bottom:20px;}";
+  css += ".status-item{text-align:center;}";
+  css += ".status-num{font-size:2em;font-weight:bold;color:#00b894;}";
+  css += ".status-label{font-size:0.8em;color:#888;}";
+  css += ".winner-display{background:linear-gradient(135deg,#00b894,#00cec9);border-radius:16px;padding:30px;text-align:center;margin-bottom:16px;}";
+  css += ".winner-title{font-size:1.2em;opacity:0.9;}";
+  css += ".winner-name{font-size:2.5em;font-weight:bold;margin:10px 0;}";
+  css += ".winner-time{font-size:1.1em;opacity:0.9;}";
+  css += ".ready-display{background:linear-gradient(135deg,#667eea,#764ba2);border-radius:16px;padding:40px;text-align:center;margin-bottom:16px;}";
+  css += ".ready-text{font-size:2em;font-weight:bold;}";
+  css += ".ready-sub{font-size:1em;opacity:0.8;margin-top:10px;}";
+  css += ".stopped-display{background:#2d3748;border-radius:16px;padding:30px;text-align:center;margin-bottom:16px;}";
+  css += ".stopped-text{font-size:1.5em;color:#888;}";
+  css += ".team-list{list-style:none;}";
+  css += ".team-item{display:flex;align-items:center;padding:12px;border-bottom:1px solid #2d3748;}";
+  css += ".team-item:last-child{border-bottom:none;}";
+  css += ".team-status{width:12px;height:12px;border-radius:50%;margin-right:12px;}";
+  css += ".team-status.online{background:#00b894;}";
+  css += ".team-status.offline{background:#e67e22;}";
+  css += ".team-status.none{background:#636e72;}";
+  css += ".team-name{flex:1;font-size:1.1em;}";
+  css += ".team-mute{color:#888;font-size:0.8em;}";
+  css += ".pending-item{background:#2d3748;border-radius:12px;padding:15px;margin:10px 0;display:flex;align-items:center;justify-content:space-between;}";
+  css += ".pending-badge{background:#e74c3c;color:#fff;padding:4px 12px;border-radius:20px;font-size:0.8em;font-weight:bold;}";
+  css += ".input{width:100%;padding:12px;font-size:1em;border:2px solid #2d3748;border-radius:8px;background:#1a1a2e;color:#fff;margin:8px 0;}";
+  css += ".input:focus{border-color:#667eea;outline:none;}";
+  css += ".nav{display:flex;gap:10px;margin-bottom:20px;}";
+  css += ".nav a{flex:1;text-align:center;padding:12px;background:#2d3748;color:#a0aec0;text-decoration:none;border-radius:8px;}";
+  css += ".nav a.active{background:#667eea;color:#fff;}";
+  css += ".mute-toggle{display:flex;align-items:center;justify-content:space-between;padding:15px;background:#2d3748;border-radius:12px;margin:10px 0;}";
+  css += ".form-group{margin:15px 0;}";
+  css += ".form-label{display:block;color:#888;margin-bottom:5px;font-size:0.9em;}";
+  css += ".remove-btn{color:#e74c3c;background:none;border:none;cursor:pointer;padding:5px 10px;}";
+  css += "</style>";
+  return css;
+}
+
+// Main game control page (teacher-friendly)
 void handleRoot() {
-  String html = "<!DOCTYPE html><html><head><title>Quiz Buzzer</title>";
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<title>Quiz Buzzer</title>";
   html += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>body{font-family:Arial;margin:20px;} button{padding:15px 30px;margin:10px;font-size:18px;background:#007bff;color:white;border:none;border-radius:5px;cursor:pointer;} ";
-  html += "button:hover{background:#0056b3;} .winner{color:green;} .active{color:blue;} input{padding:8px;margin:5px;border:1px solid #ccc;border-radius:3px;} ";
-  html += ".config{background:#f8f9fa;padding:15px;border-radius:5px;margin:10px 0;}</style></head><body>";
-  html += "<h1>Quiz Buzzer System</h1>";
-  html += "<p><strong>WiFi:</strong> " + String(ap_ssid) + "</p>";
-  html += "<p><strong>IP:</strong> " + WiFi.softAPIP().toString() + "</p>";
-  html += "<p><strong>MAC:</strong> " + WiFi.macAddress() + "</p>";
-  html += "<hr>";
-  
+  html += "<meta http-equiv='refresh' content='3'>";  // Auto-refresh every 3 seconds
+  html += getStyles();
+  html += "</head><body><div class='container'>";
+
+  html += "<h1>Quiz Buzzer</h1>";
+
+  // Count teams
+  int onlineCount = 0;
+  int configuredCount = 0;
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (teams[i].isConfigured) {
+      configuredCount++;
+      if (teams[i].isOnline) onlineCount++;
+    }
+  }
+
+  // Count pending buttons
+  int pendingCount = 0;
+  for (int i = 0; i < MAX_PENDING; i++) {
+    if (pendingButtons[i].active) pendingCount++;
+  }
+
+  html += "<p class='subtitle'>" + String(onlineCount) + " of " + String(configuredCount) + " teams connected</p>";
+
+  // Game Status Display
   if (gameActive) {
     if (winnerTeam >= 0) {
-      html += "<h2 class='winner'>WINNER: " + escapeHtml(teams[winnerTeam].name) + "!</h2>";
-      html += "<p><strong>Response Time:</strong> " + String(winnerTime) + " ms</p>";
-      html += "<button onclick=\"location.href='/reset'\">RESET ROUND</button>";
+      // Winner!
+      html += "<div class='winner-display'>";
+      html += "<div class='winner-title'>WINNER!</div>";
+      html += "<div class='winner-name'>" + escapeHtml(teams[winnerTeam].name) + "</div>";
+      html += "<div class='winner-time'>" + String(winnerTime) + " ms</div>";
+      html += "</div>";
+      html += "<button class='btn btn-reset' onclick=\"location.href='/reset'\">NEXT QUESTION</button>";
+      html += "<button class='btn btn-stop' onclick=\"location.href='/stop'\">END GAME</button>";
     } else {
-      html += "<h2 class='active'>Game Active - Ready for Buzzes!</h2>";
-      html += "<button onclick=\"location.href='/reset'\">RESET ROUND</button>";
+      // Waiting for buzz
+      html += "<div class='ready-display'>";
+      html += "<div class='ready-text'>READY!</div>";
+      html += "<div class='ready-sub'>Waiting for buzz...</div>";
+      html += "</div>";
+      html += "<button class='btn btn-reset' onclick=\"location.href='/reset'\">RESET</button>";
+      html += "<button class='btn btn-stop' onclick=\"location.href='/stop'\">STOP GAME</button>";
     }
-    html += "<button onclick=\"location.href='/stop'\">STOP GAME</button>";
   } else {
-    html += "<h2>Game Stopped</h2>";
-    html += "<button onclick=\"location.href='/start'\">START GAME</button>";
+    // Game stopped
+    html += "<div class='stopped-display'>";
+    html += "<div class='stopped-text'>Game Stopped</div>";
+    html += "</div>";
+    html += "<button class='btn btn-start' onclick=\"location.href='/start'\">START GAME</button>";
   }
-  
-  // Add audio control
-  html += "<hr><h3>Audio Settings</h3>";
-  if (audioMuted) {
-    html += "<p>🔇 Audio: MUTED</p>";
-    html += "<button onclick=\"location.href='/unmute'\">UNMUTE ALL BUTTONS</button>";
-  } else {
-    html += "<p>🔊 Audio: ENABLED</p>";
-    html += "<button onclick=\"location.href='/mute'\">MUTE ALL BUTTONS</button>";
-  }
-  
-  // Add ESP-NOW status
-  html += "<hr><h3>ESP-NOW Status</h3>";
-  html += "<p><strong>Base Station MAC:</strong> " + WiFi.macAddress() + "</p>";
-  html += "<p><strong>Active Connections:</strong> ";
-  int activeCount = 0;
+
+  // Teams list (simplified)
+  html += "<div class='card'>";
+  html += "<ul class='team-list'>";
   for (int i = 0; i < MAX_TEAMS; i++) {
-    if (teams[i].isConfigured && teams[i].isOnline) activeCount++;
-  }
-  html += String(activeCount) + " / " + String(MAX_TEAMS) + "</p>";
-  
-  html += "<hr><div class='config'><h3>Team Configuration</h3>";
-  html += "<form method='GET' action='/save'>";
-  
-  for (int i = 0; i < MAX_TEAMS; i++) {
-    html += "<div style='background:#f0f0f0;padding:10px;margin:10px 0;border-radius:5px;'>";
-    html += "<h4>Team " + String(i + 1) + "</h4>";
-    
-    html += "<p>Name: <input type='text' name='team" + String(i) + "' value='" + escapeHtml(teams[i].name) + "' maxlength='20' style='width:200px;'></p>";
-    
-    html += "<p>Button MAC: <input type='text' name='mac" + String(i) + "' value='";
-    for (int j = 0; j < 6; j++) {
-      if (j > 0) html += ":";
-      if (teams[i].mac[j] < 16) html += "0";
-      String hexByte = String(teams[i].mac[j], HEX);
-      hexByte.toUpperCase();
-      html += hexByte;
-    }
-    html += "' placeholder='AA:BB:CC:DD:EE:FF' pattern='([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' title='MAC address format: AA:BB:CC:DD:EE:FF' style='width:200px;'></p>";
-    
-    html += "<p>Status: ";
     if (teams[i].isConfigured) {
-      if (teams[i].isOnline) {
-        html += "<span style='color:green'>●</span> Online";
-      } else {
-        html += "<span style='color:orange'>●</span> Configured (Not seen recently)";
-      }
-    } else {
-      html += "<span style='color:red'>●</span> Not configured";
-    }
-    html += "</p></div>";
-  }
-  
-  html += "<button type='submit'>Save Configuration</button>";
-  html += "</form></div>";
-  
-  html += "<hr><h3>Current Teams:</h3>";
-  html += "<table style='border-collapse:collapse;width:100%;'>";
-  html += "<tr style='background:#f0f0f0;'><th style='border:1px solid #ccc;padding:8px;'>Team</th><th style='border:1px solid #ccc;padding:8px;'>Name</th><th style='border:1px solid #ccc;padding:8px;'>Status</th><th style='border:1px solid #ccc;padding:8px;'>Audio</th></tr>";
-  
-  for (int i = 0; i < MAX_TEAMS; i++) {
-    html += "<tr><td style='border:1px solid #ccc;padding:8px;'>" + String(i + 1) + "</td>";
-    html += "<td style='border:1px solid #ccc;padding:8px;'>" + escapeHtml(teams[i].name) + "</td>";
-    html += "<td style='border:1px solid #ccc;padding:8px;'>";
-    
-    if (teams[i].isConfigured) {
-      if (teams[i].isOnline) {
-        html += "<span style='color:green'>●</span> Online";
-      } else {
-        html += "<span style='color:orange'>●</span> Offline";
-      }
-    } else {
-      html += "<span style='color:red'>●</span> Not configured";
-    }
-    
-    html += "</td><td style='border:1px solid #ccc;padding:8px;'>";
-    
-    // Individual mute controls
-    if (teams[i].isConfigured) {
+      html += "<li class='team-item'>";
+      html += "<span class='team-status " + String(teams[i].isOnline ? "online" : "offline") + "'></span>";
+      html += "<span class='team-name'>" + escapeHtml(teams[i].name) + "</span>";
       if (teams[i].isMuted || audioMuted) {
-        html += "🔇 ";
-        if (!audioMuted) { // Only show unmute if not globally muted
-          html += "<a href='/unmute-team?id=" + String(i) + "' style='font-size:12px;'>Unmute</a>";
-        } else {
-          html += "<span style='font-size:12px;color:gray;'>Global Mute</span>";
-        }
-      } else {
-        html += "🔊 <a href='/mute-team?id=" + String(i) + "' style='font-size:12px;'>Mute</a>";
+        html += "<span class='team-mute'>muted</span>";
       }
-    } else {
-      html += "-";
+      html += "</li>";
     }
-    
-    html += "</td></tr>";
   }
-  html += "</table>";
-  
-  html += "<hr><p><strong>SD Card:</strong> ";
-  if (sdCardAvailable) {
-    html += "<span style='color:green'>Available - Settings will be saved</span>";
+  if (configuredCount == 0) {
+    html += "<li class='team-item'><span class='team-name' style='color:#888;'>No teams configured yet</span></li>";
+  }
+  html += "</ul></div>";
+
+  // Pending buttons alert
+  if (pendingCount > 0) {
+    html += "<div class='card' style='border:2px solid #e74c3c;'>";
+    html += "<div style='display:flex;align-items:center;margin-bottom:10px;'>";
+    html += "<span class='pending-badge'>" + String(pendingCount) + " NEW</span>";
+    html += "<span style='margin-left:10px;'>New buttons detected!</span>";
+    html += "</div>";
+    html += "<button class='btn btn-add' onclick=\"location.href='/settings'\">Add Buttons</button>";
+    html += "</div>";
+  }
+
+  // Sound toggle
+  html += "<div class='mute-toggle'>";
+  html += "<span>Sound Effects</span>";
+  if (audioMuted) {
+    html += "<button class='btn-mute' onclick=\"location.href='/unmute'\">UNMUTE</button>";
   } else {
-    html += "<span style='color:red'>Not Available - Settings will be lost on restart</span>";
+    html += "<button class='btn-mute' onclick=\"location.href='/mute'\">MUTE</button>";
   }
-  html += "</p>";
-  
-  html += "</body></html>";
+  html += "</div>";
+
+  // Settings link
+  html += "<button class='btn btn-settings' onclick=\"location.href='/settings'\">Settings</button>";
+
+  html += "</div></body></html>";
   server.send(200, "text/html", html);
+}
+
+// Settings page (for configuration)
+void handleSettings() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<title>Settings - Quiz Buzzer</title>";
+  html += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += getStyles();
+  html += "</head><body><div class='container'>";
+
+  html += "<h1>Settings</h1>";
+  html += "<div class='nav'>";
+  html += "<a href='/'>Game</a>";
+  html += "<a href='/settings' class='active'>Settings</a>";
+  html += "</div>";
+
+  // Count pending buttons
+  int pendingCount = 0;
+  for (int i = 0; i < MAX_PENDING; i++) {
+    if (pendingButtons[i].active) pendingCount++;
+  }
+
+  // Pending buttons section (auto-discovery)
+  if (pendingCount > 0) {
+    html += "<div class='card' style='border:2px solid #667eea;'>";
+    html += "<h3 style='margin-bottom:15px;'>New Buttons Detected</h3>";
+    html += "<p style='color:#888;margin-bottom:15px;font-size:0.9em;'>These buttons are powered on but not configured yet. Give them a name to add them.</p>";
+
+    for (int i = 0; i < MAX_PENDING; i++) {
+      if (pendingButtons[i].active) {
+        html += "<div class='pending-item'>";
+        html += "<form method='GET' action='/add-pending' style='display:flex;align-items:center;width:100%;gap:10px;'>";
+        html += "<input type='hidden' name='mac' value='" + formatMac(pendingButtons[i].mac) + "'>";
+        html += "<input type='text' name='name' placeholder='Team name' class='input' style='flex:1;margin:0;' required>";
+        html += "<button type='submit' class='btn btn-add' style='width:auto;margin:0;'>Add</button>";
+        html += "</form>";
+        html += "</div>";
+      }
+    }
+    html += "</div>";
+  }
+
+  // Configured teams
+  html += "<div class='card'>";
+  html += "<h3 style='margin-bottom:15px;'>Configured Teams</h3>";
+
+  int configuredCount = 0;
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (teams[i].isConfigured) {
+      configuredCount++;
+      html += "<div style='display:flex;align-items:center;padding:12px 0;border-bottom:1px solid #2d3748;'>";
+      html += "<span class='team-status " + String(teams[i].isOnline ? "online" : "offline") + "'></span>";
+      html += "<span style='flex:1;'>" + escapeHtml(teams[i].name) + "</span>";
+
+      // Mute toggle
+      if (teams[i].isMuted) {
+        html += "<a href='/unmute-team?id=" + String(i) + "' style='color:#888;margin-right:10px;'>unmute</a>";
+      } else {
+        html += "<a href='/mute-team?id=" + String(i) + "' style='color:#888;margin-right:10px;'>mute</a>";
+      }
+
+      html += "<a href='/remove-team?id=" + String(i) + "' class='remove-btn'>Remove</a>";
+      html += "</div>";
+    }
+  }
+
+  if (configuredCount == 0) {
+    html += "<p style='color:#888;text-align:center;padding:20px;'>No teams configured yet. Power on a button to detect it automatically!</p>";
+  }
+
+  html += "</div>";
+
+  // Manual add section (collapsed by default)
+  html += "<div class='card'>";
+  html += "<details>";
+  html += "<summary style='cursor:pointer;color:#888;'>Manual Configuration (Advanced)</summary>";
+  html += "<div style='margin-top:15px;'>";
+  html += "<p style='color:#666;font-size:0.85em;margin-bottom:15px;'>Only use this if auto-discovery isn't working. You'll need the MAC address from the button's display.</p>";
+  html += "<form method='GET' action='/save'>";
+
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    html += "<div class='form-group'>";
+    html += "<label class='form-label'>Team " + String(i + 1) + "</label>";
+    html += "<input type='text' name='team" + String(i) + "' value='" + escapeHtml(teams[i].name) + "' placeholder='Team name' class='input'>";
+    html += "<input type='text' name='mac" + String(i) + "' value='" + formatMac(teams[i].mac) + "' placeholder='AA:BB:CC:DD:EE:FF' pattern='([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' class='input'>";
+    html += "</div>";
+  }
+
+  html += "<button type='submit' class='btn btn-settings'>Save All</button>";
+  html += "</form>";
+  html += "</div></details></div>";
+
+  // System info
+  html += "<div class='card'>";
+  html += "<h3 style='margin-bottom:15px;'>System Info</h3>";
+  html += "<p style='color:#888;font-size:0.9em;'>WiFi: " + String(ap_ssid) + "</p>";
+  html += "<p style='color:#888;font-size:0.9em;'>IP: " + WiFi.softAPIP().toString() + "</p>";
+  html += "<p style='color:#888;font-size:0.9em;'>SD Card: " + String(sdCardAvailable ? "Connected" : "Not available") + "</p>";
+  html += "</div>";
+
+  html += "<button class='btn btn-settings' onclick=\"location.href='/'\">Back to Game</button>";
+
+  html += "</div></body></html>";
+  server.send(200, "text/html", html);
+}
+
+// Add a pending button as a configured team
+void handleAddPending() {
+  String mac = server.arg("mac");
+  String name = server.arg("name");
+
+  if (mac.length() == 0 || name.length() == 0) {
+    server.sendHeader("Location", "/settings");
+    server.send(302);
+    return;
+  }
+
+  // Parse MAC address
+  uint8_t macBytes[6];
+  int values[6];
+  if (sscanf(mac.c_str(), "%x:%x:%x:%x:%x:%x",
+      &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]) == 6) {
+    for (int i = 0; i < 6; i++) macBytes[i] = (uint8_t)values[i];
+  } else {
+    server.sendHeader("Location", "/settings");
+    server.send(302);
+    return;
+  }
+
+  // Find empty team slot
+  int slot = -1;
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (!teams[i].isConfigured) {
+      slot = i;
+      break;
+    }
+  }
+
+  if (slot == -1) {
+    // No empty slots - find slot with matching MAC or oldest offline
+    for (int i = 0; i < MAX_TEAMS; i++) {
+      bool match = true;
+      for (int j = 0; j < 6; j++) {
+        if (teams[i].mac[j] != macBytes[j]) { match = false; break; }
+      }
+      if (match) { slot = i; break; }
+    }
+  }
+
+  if (slot >= 0) {
+    teams[slot].name = name;
+    memcpy(teams[slot].mac, macBytes, 6);
+    teams[slot].isConfigured = true;
+    teams[slot].isOnline = false;
+    teams[slot].isMuted = false;
+
+    // Remove from pending list
+    int pendingIdx = findPendingButton(macBytes);
+    if (pendingIdx >= 0) {
+      pendingButtons[pendingIdx].active = false;
+    }
+
+    saveConfig();
+    Serial.printf("Added team '%s' with MAC %s\n", name.c_str(), mac.c_str());
+  }
+
+  server.sendHeader("Location", "/settings");
+  server.send(302);
+}
+
+// Remove a configured team
+void handleRemoveTeam() {
+  if (server.hasArg("id")) {
+    int id = server.arg("id").toInt();
+    if (id >= 0 && id < MAX_TEAMS && teams[id].isConfigured) {
+      Serial.printf("Removing team '%s'\n", teams[id].name.c_str());
+      teams[id].name = "Team " + String(id + 1);
+      memset(teams[id].mac, 0, 6);
+      teams[id].isConfigured = false;
+      teams[id].isOnline = false;
+      teams[id].isMuted = false;
+      saveConfig();
+    }
+  }
+  server.sendHeader("Location", "/settings");
+  server.send(302);
+}
+
+// JSON API for status (for potential future AJAX updates)
+void handleApiStatus() {
+  String json = "{";
+  json += "\"gameActive\":" + String(gameActive ? "true" : "false") + ",";
+  json += "\"winnerTeam\":" + String(winnerTeam) + ",";
+  json += "\"winnerTime\":" + String(winnerTime) + ",";
+  if (winnerTeam >= 0) {
+    json += "\"winnerName\":\"" + escapeHtml(teams[winnerTeam].name) + "\",";
+  }
+  json += "\"audioMuted\":" + String(audioMuted ? "true" : "false") + ",";
+
+  // Teams
+  json += "\"teams\":[";
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (i > 0) json += ",";
+    json += "{";
+    json += "\"name\":\"" + escapeHtml(teams[i].name) + "\",";
+    json += "\"configured\":" + String(teams[i].isConfigured ? "true" : "false") + ",";
+    json += "\"online\":" + String(teams[i].isOnline ? "true" : "false") + ",";
+    json += "\"muted\":" + String(teams[i].isMuted ? "true" : "false");
+    json += "}";
+  }
+  json += "],";
+
+  // Pending count
+  int pendingCount = 0;
+  for (int i = 0; i < MAX_PENDING; i++) {
+    if (pendingButtons[i].active) pendingCount++;
+  }
+  json += "\"pendingCount\":" + String(pendingCount);
+  json += "}";
+
+  server.send(200, "application/json", json);
 }
 
 void handleStart() {
@@ -637,22 +983,22 @@ void handleMuteTeam() {
     int teamId = server.arg("id").toInt();
     if (teamId >= 0 && teamId < MAX_TEAMS && teams[teamId].isConfigured) {
       teams[teamId].isMuted = true;
-      
+
       // Send updated status to this specific team
       sendTeamStatusUpdate(teamId);
-      
+
       // Save configuration to persist mute state
       saveConfig();
-      
+
       updateDisplay();
-      server.sendHeader("Location", "/");
-      server.send(302, "text/plain", teams[teamId].name + " Muted!");
+      server.sendHeader("Location", "/settings");
+      server.send(302);
       return;
     }
   }
-  
-  server.sendHeader("Location", "/");
-  server.send(302, "text/plain", "Invalid team!");
+
+  server.sendHeader("Location", "/settings");
+  server.send(302);
 }
 
 void handleUnmuteTeam() {
@@ -660,22 +1006,22 @@ void handleUnmuteTeam() {
     int teamId = server.arg("id").toInt();
     if (teamId >= 0 && teamId < MAX_TEAMS && teams[teamId].isConfigured) {
       teams[teamId].isMuted = false;
-      
+
       // Send updated status to this specific team
       sendTeamStatusUpdate(teamId);
-      
+
       // Save configuration to persist mute state
       saveConfig();
-      
+
       updateDisplay();
-      server.sendHeader("Location", "/");
-      server.send(302, "text/plain", teams[teamId].name + " Unmuted!");
+      server.sendHeader("Location", "/settings");
+      server.send(302);
       return;
     }
   }
-  
-  server.sendHeader("Location", "/");
-  server.send(302, "text/plain", "Invalid team!");
+
+  server.sendHeader("Location", "/settings");
+  server.send(302);
 }
 
 void handleSave() {
@@ -708,13 +1054,13 @@ void handleSave() {
   if (sdCardAvailable) {
     saveConfig();
   }
-  
+
   // Update display with new team names
   updateDisplay();
-  
-  // Redirect back to main page
-  server.sendHeader("Location", "/");
-  server.send(302, "text/plain", "Configuration saved!");
+
+  // Redirect back to settings page
+  server.sendHeader("Location", "/settings");
+  server.send(302);
 }
 
 void saveConfig() {
