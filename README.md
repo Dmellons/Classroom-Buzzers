@@ -122,11 +122,29 @@ You will need to create two secret files - one for the base station and one for 
 
 ## 📚 Documentation
 
+### Setup Guides
 - **[Base Station Setup](base-station/README.md)** - Detailed wiring, code setup, and troubleshooting
 - **[Button Setup](button/README.md)** - Button assembly, battery management, and configuration
+
+### Hardware Documentation
 - **[Components List](components-list.md)** - Complete hardware BOM and pin assignments
 - **[Button Wiring Guide](button-wiring-guide.md)** - Detailed wiring for battery-powered buttons
 - **[Breadboard Guide](breadboard-button-guide.md)** - Simplified USB-powered setup for testing
+- **[Speaker Wiring Guide](speaker-wiring-guide.md)** - Audio system wiring
+- **[Hardware Reference](docs/HARDWARE_REFERENCE.md)** - Complete hardware specifications
+
+### Technical Documentation
+- **[Software Architecture](docs/SOFTWARE_ARCHITECTURE.md)** - Code structure and functions
+- **[ESP-NOW Protocol](docs/ESP_NOW_PROTOCOL.md)** - Communication protocol details
+- **[LLM Context](docs/LLM_CONTEXT.md)** - Complete system overview for AI assistants
+
+### 3D Printing
+- **[Enclosure Guide](enclosure/README.md)** - 3D printable housing designs
+- **[How to Generate STL](enclosure/HOW_TO_GENERATE_STL.md)** - Convert OpenSCAD to STL files
+
+### Development
+- **[CLAUDE.md](CLAUDE.md)** - AI development guide
+- **[CHANGELOG.md](CHANGELOG.md)** - Development history
 
 ## 🔧 Troubleshooting
 

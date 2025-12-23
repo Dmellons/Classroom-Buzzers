@@ -5,7 +5,15 @@
       "Bash(mv:*)",
       "Bash(arduino-cli compile:*)",
       "Bash(where esptool.py)",
-      "Bash(dir \"C:\\Users\\david\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esptool_py\")"
+      "Bash(dir \"C:\\Users\\david\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esptool_py\")",
+      "Bash(dir /s /b)",
+      "Bash(ls:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(dir:*)",
+      "Bash(where:*)",
+      "Bash(del .\\\\nul)"
     ],
     "deny": []
   }

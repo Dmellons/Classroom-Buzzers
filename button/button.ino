@@ -63,6 +63,12 @@ int batteryPercent = 0;
 unsigned long lastBatteryRead = 0;
 const unsigned long batteryReadInterval = 30000; // Read battery every 30 seconds
 
+// Connection tracking
+#define CONNECTION_TIMEOUT_MS 15000  // Consider disconnected after 15 seconds
+#define LOW_BATTERY_THRESHOLD 15     // Show warning when battery < 15%
+bool isConnected = false;
+unsigned long lastBaseStationMsg = 0;
+
 // Interrupt handler for button press
 void IRAM_ATTR buttonISR() {
   buttonPressed = true;
@@ -76,6 +82,10 @@ void IRAM_ATTR buttonISR() {
 //   Bytes 4-31: Team name (up to 27 chars + null terminator)
 void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
   if (len < 1) return;
+
+  // Track connection status
+  lastBaseStationMsg = millis();
+  isConnected = true;
 
   uint8_t response = incomingData[0];
   messagesReceived++; // Count messages received
@@ -176,81 +186,113 @@ void drawBatteryIcon(int x, int y, int percent) {
   display.print("%");
 }
 
+// Helper: Draw connection indicator icon
+void drawConnectionIcon(int x, int y, bool connected) {
+  if (connected) {
+    // Filled WiFi-like icon (3 arcs)
+    display.fillCircle(x + 3, y + 5, 1, SSD1306_WHITE);  // Center dot
+    display.drawLine(x + 1, y + 3, x + 5, y + 3, SSD1306_WHITE);  // Arc 1
+    display.drawLine(x, y + 1, x + 6, y + 1, SSD1306_WHITE);      // Arc 2
+  } else {
+    // Outline only (disconnected)
+    display.drawCircle(x + 3, y + 5, 1, SSD1306_WHITE);
+    display.drawPixel(x + 2, y + 3, SSD1306_WHITE);
+    display.drawPixel(x + 4, y + 3, SSD1306_WHITE);
+    // X mark to show disconnected
+    display.drawLine(x, y, x + 6, y + 6, SSD1306_WHITE);
+    display.drawLine(x + 6, y, x, y + 6, SSD1306_WHITE);
+  }
+}
+
 void updateDisplay() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
 
-  // Draw battery indicator in top-right corner
+  // --- TOP STATUS BAR (line 0, 8px height) ---
+  // Connection indicator at top-left
+  drawConnectionIcon(0, 0, isConnected);
+
+  // Low battery warning in center of status bar
+  if (batteryPercent < LOW_BATTERY_THRESHOLD) {
+    display.setCursor(12, 0);
+    display.print("! LOW BAT");
+  }
+
+  // Battery indicator in top-right corner
   drawBatteryIcon(110, 0, batteryPercent);
 
-  // Show current state
-  display.setCursor(0, 0);
+  // --- MAIN CONTENT (lines 1-3, 24px) ---
   switch (currentState) {
     case WAITING:
-      if (teamName.length() > 0) {
-        // Connected - show team name prominently
-        display.setCursor(0, 10); // Move down to avoid battery icon
+      if (teamName.length() > 0 && isConnected) {
+        // Connected with team name - show name large
+        display.setCursor(0, 10);
         display.setTextSize(2);
-        display.println(teamName.c_str());
+        // Truncate long names (10 chars max at size 2)
+        String dispName = teamName.substring(0, 10);
+        display.println(dispName.c_str());
         display.setTextSize(1);
-        display.println("Ready to play!");
+        display.print("  Ready to play!");
       } else {
-        // Not connected - show connection info and debug
+        // Not connected or no team name - show debug info
         String mac = WiFi.macAddress();
         mac.toUpperCase();
-        display.setCursor(0, 8); // Move down to avoid battery icon
+        display.setCursor(10, 8);
         display.printf("MAC:%s\n", mac.c_str());
-        display.printf("HB:%s M:%d\n", heartbeatSuccess ? "OK" : "X", messagesReceived);
-        display.printf("Btn:%d Sent:%d\n", buttonPressCount, messagesSent);
+        display.printf(" HB:%s M:%d Btn:%d\n",
+                       heartbeatSuccess ? "OK" : "X",
+                       messagesReceived, buttonPressCount);
+        display.print(" Waiting for base...");
       }
       break;
-      
+
     case READY:
-      // Show team name and ready status
-      display.setCursor(0, 8); // Move down to avoid battery icon
-      display.setTextSize(1);
-      if (teamName.length() > 0) {
-        display.println(teamName.c_str());
-      }
+      // Large READY with team name
       display.setTextSize(2);
-      display.println("READY!");
+      if (teamName.length() > 0) {
+        // Center the team name
+        String dispName = teamName.substring(0, 10);
+        int16_t x1, y1;
+        uint16_t w, h;
+        display.getTextBounds(dispName.c_str(), 0, 0, &x1, &y1, &w, &h);
+        display.setCursor((SCREEN_WIDTH - w) / 2, 9);
+        display.println(dispName.c_str());
+      } else {
+        display.setCursor(20, 9);
+        display.println("READY!");
+      }
       display.setTextSize(1);
-      display.println("Press now!");
+      display.setCursor(32, 25);
+      display.print("Press now!");
       break;
 
     case WINNER:
-      // Show team name, winner status, and response time
-      display.setCursor(0, 8); // Move down to avoid battery icon
-      display.setTextSize(1);
-      if (teamName.length() > 0) {
-        display.println(teamName.c_str());
-      }
+      // Large WINNER with response time
       display.setTextSize(2);
+      display.setCursor(16, 9);
       display.println("WINNER!");
       display.setTextSize(1);
       if (responseTimeMs > 0) {
-        display.printf("Time: %d ms", responseTimeMs);
+        display.setCursor(32, 25);
+        display.printf("Time: %dms", responseTimeMs);
       } else {
-        display.println("You got it!");
+        display.setCursor(32, 25);
+        display.print("You got it!");
       }
       break;
 
     case LOCKED_OUT:
-      // Show team name and locked status
-      display.setCursor(0, 8); // Move down to avoid battery icon
-      display.setTextSize(1);
-      if (teamName.length() > 0) {
-        display.println(teamName.c_str());
-      }
+      // Large LOCKED
       display.setTextSize(2);
+      display.setCursor(20, 9);
       display.println("LOCKED");
       display.setTextSize(1);
-      display.println("Too late!");
+      display.setCursor(36, 25);
+      display.print("Too late!");
       break;
   }
-  
+
   display.display();
 }
 
@@ -572,6 +614,12 @@ void loop() {
   if (currentTime - lastHeartbeat > heartbeatInterval) {
     sendHeartbeat();
     lastHeartbeat = currentTime;
+  }
+
+  // Check connection timeout
+  if (isConnected && (currentTime - lastBaseStationMsg > CONNECTION_TIMEOUT_MS)) {
+    isConnected = false;
+    updateDisplay();  // Update display to show disconnected
   }
 
   // Read battery level periodically

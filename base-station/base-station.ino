@@ -42,9 +42,10 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define STATUS_LOCKED_OUT 2
 #define STATUS_GAME_READY 3
 
-// WiFi credentials from secret file
-const char* ap_ssid = WIFI_SSID;
-const char* ap_password = WIFI_PASSWORD;
+// WiFi credentials (defaults from secret file, can be changed via settings)
+String ap_ssid = WIFI_SSID;
+String ap_password = WIFI_PASSWORD;
+bool wifiSettingsChanged = false;  // Flag to show reboot needed
 
 // Web server
 WebServer server(80);
@@ -54,6 +55,15 @@ bool gameActive = false;
 int winnerTeam = -1;
 unsigned long gameStartTime = 0;
 unsigned long winnerTime = 0;
+
+// Countdown settings (saved to SD card)
+bool countdownEnabled = false;        // Off by default
+int countdownSeconds = 3;             // Configurable: 1-5 seconds
+
+// Countdown state (runtime only)
+bool countdownActive = false;
+unsigned long countdownStartTime = 0;
+int countdownStep = 0;                // Current step: 3, 2, 1, 0 (BUZZ!)
 
 // Audio settings
 bool audioMuted = false;
@@ -299,7 +309,7 @@ void setup() {
   delay(100);
 
   // Set WiFi AP on channel 1 for ESP-NOW compatibility
-  if (WiFi.softAP(ap_ssid, ap_password, 1)) {
+  if (WiFi.softAP(ap_ssid.c_str(), ap_password.c_str(), 1)) {
     // WiFi started successfully
     display.clearDisplay();
     display.setCursor(0, 0);
@@ -346,6 +356,8 @@ void setup() {
   server.on("/unmute-team", handleUnmuteTeam);
   server.on("/add-pending", handleAddPending);
   server.on("/remove-team", handleRemoveTeam);
+  server.on("/save-settings", handleSaveSettings);
+  server.on("/reboot", handleReboot);
   server.on("/api/status", handleApiStatus);
   server.begin();
   
@@ -373,6 +385,24 @@ void setup() {
 
 void loop() {
   server.handleClient();
+
+  // Process countdown timer
+  if (countdownActive) {
+    unsigned long elapsed = millis() - countdownStartTime;
+    int newStep = countdownSeconds - (elapsed / 1000);
+
+    if (newStep != countdownStep) {
+      countdownStep = newStep;
+      Serial.printf("Countdown: %d\n", countdownStep);
+      updateDisplay();
+    }
+
+    // Countdown finished - start the game
+    if (elapsed >= (countdownSeconds * 1000)) {
+      Serial.println("Countdown complete - starting game!");
+      startGameNow();
+    }
+  }
 
   // Handle physical button presses
   handlePhysicalButtons();
@@ -457,70 +487,157 @@ void handleButtonPress(int teamIndex) {
 unsigned long lastDisplayUpdate = 0;
 int currentDisplayTeam = 0;
 
+// Helper: Get team status character for scoreboard
+char getTeamStatusChar(int idx) {
+  if (!teams[idx].isConfigured) return '-';
+  if (winnerTeam == idx) return '*';  // Star for winner
+  if (teams[idx].isOnline) return 'O';  // Filled circle (will be ●)
+  return 'o';  // Empty circle (will be ○)
+}
+
+// Helper: Count configured teams
+int countConfiguredTeams() {
+  int count = 0;
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (teams[i].isConfigured) count++;
+  }
+  return count;
+}
+
+// Helper: Count online teams
+int countOnlineTeams() {
+  int count = 0;
+  for (int i = 0; i < MAX_TEAMS; i++) {
+    if (teams[i].isConfigured && teams[i].isOnline) count++;
+  }
+  return count;
+}
+
 void updateDisplay() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-  
+
+  // --- COUNTDOWN MODE ---
+  if (countdownActive) {
+    display.setTextSize(4);  // Large countdown number
+    String text;
+    if (countdownStep > 0) {
+      text = String(countdownStep);
+    } else {
+      text = "GO!";
+    }
+    // Center the text
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(text.c_str(), 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((SCREEN_WIDTH - w) / 2, (SCREEN_HEIGHT - h) / 2);
+    display.print(text);
+    display.display();
+    return;
+  }
+
+  // --- GAME ACTIVE MODE ---
   if (gameActive) {
     if (winnerTeam >= 0) {
-      display.setTextSize(2);
-      display.println("WINNER:");
-      display.println(teams[winnerTeam].name);
+      // Enhanced winner display
+      display.setCursor(0, 0);
       display.setTextSize(1);
-      display.printf("Time: %lu ms\n", winnerTime);
+      display.println("    *** WINNER ***");
+      display.println();
+
+      // Team name large and centered
+      display.setTextSize(2);
+      String name = teams[winnerTeam].name;
+      if (name.length() > 10) name = name.substring(0, 10);  // Truncate if needed
+      int16_t x1, y1;
+      uint16_t w, h;
+      display.getTextBounds(name.c_str(), 0, 0, &x1, &y1, &w, &h);
+      display.setCursor((SCREEN_WIDTH - w) / 2, 20);
+      display.println(name);
+
+      // Response time
+      display.setTextSize(1);
+      display.setCursor(0, 44);
+      display.printf("    Response: %lu ms", winnerTime);
+
+      // Reset instruction
+      display.setCursor(0, 56);
+      display.print(" Press RESET for next Q");
+
     } else {
-      display.setTextSize(2);
-      display.println("READY!");
+      // Live scoreboard - show all teams with status
       display.setTextSize(1);
-      display.println("Waiting for buzz...");
-    }
-  } else {
-    // Count connected teams
-    int connectedCount = 0;
-    for (int i = 0; i < MAX_TEAMS; i++) {
-      if (teams[i].isConfigured && teams[i].isOnline) {
-        connectedCount++;
+      display.printf("GAME ON     Teams:%d/%d", countOnlineTeams(), countConfiguredTeams());
+      display.setCursor(0, 10);
+
+      // Draw 2-column grid of configured teams
+      int col = 0;
+      int row = 0;
+      for (int i = 0; i < MAX_TEAMS; i++) {
+        if (teams[i].isConfigured) {
+          int x = col * 64;
+          int y = 10 + (row * 9);
+
+          display.setCursor(x, y);
+          // Team number and truncated name
+          String shortName = teams[i].name.substring(0, 6);
+          display.printf("%d.%s", i + 1, shortName.c_str());
+
+          // Status indicator
+          display.setCursor(x + 56, y);
+          display.print(getTeamStatusChar(i));
+
+          col++;
+          if (col >= 2) {
+            col = 0;
+            row++;
+          }
+        }
       }
+
+      // Status bar at bottom
+      display.setCursor(0, 56);
+      display.print(">>> WAITING FOR BUZZ <<<");
     }
-    
-    // Always show WiFi info
-    display.printf("SSID: %s\n", ap_ssid);
+
+  // --- GAME STOPPED MODE ---
+  } else {
+    int connectedCount = countOnlineTeams();
+
+    // WiFi info header
+    display.printf("SSID: %s\n", ap_ssid.c_str());
     display.printf("IP: %s\n", WiFi.softAPIP().toString().c_str());
     display.printf("Teams: %d/%d\n", connectedCount, MAX_TEAMS);
     display.println();
-    
+
     if (connectedCount > 0) {
       // Cycle through connected teams
       unsigned long currentTime = millis();
       if (currentTime - lastDisplayUpdate >= DISPLAY_CYCLE_INTERVAL_MS) {
         lastDisplayUpdate = currentTime;
-        
+
         // Find next connected team
         int startTeam = currentDisplayTeam;
         do {
           currentDisplayTeam = (currentDisplayTeam + 1) % MAX_TEAMS;
         } while (!teams[currentDisplayTeam].isConfigured || !teams[currentDisplayTeam].isOnline);
-        
+
         // Prevent infinite loop if no teams connected
         if (currentDisplayTeam == startTeam && (!teams[currentDisplayTeam].isConfigured || !teams[currentDisplayTeam].isOnline)) {
           currentDisplayTeam = 0;
         }
       }
-      
+
       // Display current team info
       if (teams[currentDisplayTeam].isConfigured && teams[currentDisplayTeam].isOnline) {
         display.setTextSize(2);
         display.printf("Team %d\n", currentDisplayTeam + 1);
         display.println(teams[currentDisplayTeam].name);
         display.setTextSize(1);
-        display.printf("MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", 
-                      teams[currentDisplayTeam].mac[0], teams[currentDisplayTeam].mac[1], 
-                      teams[currentDisplayTeam].mac[2], teams[currentDisplayTeam].mac[3], 
-                      teams[currentDisplayTeam].mac[4], teams[currentDisplayTeam].mac[5]);
         if (teams[currentDisplayTeam].isMuted) {
-          display.println("MUTED");
+          display.println("[MUTED]");
         }
       }
     } else {
@@ -529,7 +646,7 @@ void updateDisplay() {
       display.println("web interface");
     }
   }
-  
+
   display.display();
 }
 
@@ -781,11 +898,67 @@ void handleSettings() {
   html += "</form>";
   html += "</div></details></div>";
 
+  // Countdown settings section
+  html += "<div class='card'>";
+  html += "<h3 style='margin-bottom:15px;'>Game Settings</h3>";
+  html += "<form method='GET' action='/save-settings'>";
+
+  // Countdown toggle
+  html += "<div style='display:flex;align-items:center;margin-bottom:15px;'>";
+  html += "<input type='checkbox' name='countdown' id='countdown' value='1'";
+  if (countdownEnabled) html += " checked";
+  html += " style='width:20px;height:20px;margin-right:10px;'>";
+  html += "<label for='countdown' style='color:#ccc;'>Enable countdown before game starts</label>";
+  html += "</div>";
+
+  // Countdown duration
+  html += "<div style='display:flex;align-items:center;margin-bottom:15px;'>";
+  html += "<label style='color:#888;margin-right:10px;'>Countdown duration:</label>";
+  html += "<select name='countdown_secs' style='background:#2d3748;color:#fff;border:1px solid #4a5568;padding:8px;border-radius:6px;'>";
+  for (int s = 1; s <= 5; s++) {
+    html += "<option value='" + String(s) + "'";
+    if (countdownSeconds == s) html += " selected";
+    html += ">" + String(s) + " second" + (s > 1 ? "s" : "") + "</option>";
+  }
+  html += "</select>";
+  html += "</div>";
+
+  // WiFi Settings section
+  html += "<h3 style='margin:20px 0 15px 0;border-top:1px solid #4a5568;padding-top:20px;'>WiFi Settings</h3>";
+
+  // Show reboot warning if settings changed
+  if (wifiSettingsChanged) {
+    html += "<div style='background:#744210;padding:12px;border-radius:6px;margin-bottom:15px;'>";
+    html += "<strong>Reboot required!</strong> WiFi settings have changed. ";
+    html += "<a href='/reboot' style='color:#fbd38d;'>Click here to reboot</a>";
+    html += "</div>";
+  }
+
+  // SSID input
+  html += "<div style='margin-bottom:15px;'>";
+  html += "<label style='color:#888;display:block;margin-bottom:5px;'>Network Name (SSID):</label>";
+  html += "<input type='text' name='wifi_ssid' value='" + escapeHtml(ap_ssid) + "' ";
+  html += "maxlength='32' style='background:#2d3748;color:#fff;border:1px solid #4a5568;padding:10px;border-radius:6px;width:100%;' required>";
+  html += "</div>";
+
+  // Password input
+  html += "<div style='margin-bottom:15px;'>";
+  html += "<label style='color:#888;display:block;margin-bottom:5px;'>Password (min 8 characters):</label>";
+  html += "<input type='text' name='wifi_pass' value='" + escapeHtml(ap_password) + "' ";
+  html += "minlength='8' maxlength='63' style='background:#2d3748;color:#fff;border:1px solid #4a5568;padding:10px;border-radius:6px;width:100%;' required>";
+  html += "<p style='color:#666;font-size:0.8em;margin-top:5px;'>Changes take effect after reboot</p>";
+  html += "</div>";
+
+  html += "<button type='submit' class='btn btn-settings'>Save Settings</button>";
+  html += "</form>";
+  html += "</div>";
+
   // System info
   html += "<div class='card'>";
   html += "<h3 style='margin-bottom:15px;'>System Info</h3>";
   html += "<p style='color:#888;font-size:0.9em;'>WiFi: " + String(ap_ssid) + "</p>";
   html += "<p style='color:#888;font-size:0.9em;'>IP: " + WiFi.softAPIP().toString() + "</p>";
+  html += "<p style='color:#888;font-size:0.9em;'>Base MAC: <code style='background:#2d3748;padding:2px 6px;border-radius:3px;'>" + WiFi.macAddress() + "</code></p>";
   html += "<p style='color:#888;font-size:0.9em;'>SD Card: " + String(sdCardAvailable ? "Connected" : "Not available") + "</p>";
   html += "</div>";
 
@@ -877,6 +1050,69 @@ void handleRemoveTeam() {
   server.send(302);
 }
 
+// Save game settings (countdown, etc.)
+void handleSaveSettings() {
+  // Countdown setting - checkbox only present when checked
+  countdownEnabled = server.hasArg("countdown");
+
+  // Countdown duration
+  if (server.hasArg("countdown_secs")) {
+    int secs = server.arg("countdown_secs").toInt();
+    if (secs >= 1 && secs <= 5) {
+      countdownSeconds = secs;
+    }
+  }
+
+  // WiFi SSID
+  if (server.hasArg("wifi_ssid")) {
+    String newSsid = server.arg("wifi_ssid");
+    newSsid.trim();
+    if (newSsid.length() > 0 && newSsid.length() <= 32) {
+      if (newSsid != ap_ssid) {
+        ap_ssid = newSsid;
+        wifiSettingsChanged = true;
+      }
+    }
+  }
+
+  // WiFi Password
+  if (server.hasArg("wifi_pass")) {
+    String newPass = server.arg("wifi_pass");
+    newPass.trim();
+    if (newPass.length() >= 8 && newPass.length() <= 63) {
+      if (newPass != ap_password) {
+        ap_password = newPass;
+        wifiSettingsChanged = true;
+      }
+    }
+  }
+
+  Serial.printf("Settings saved: countdown=%s, duration=%d, SSID=%s\n",
+                countdownEnabled ? "enabled" : "disabled", countdownSeconds, ap_ssid.c_str());
+
+  saveConfig();
+  server.sendHeader("Location", "/settings");
+  server.send(302, "text/plain", "Settings saved!");
+}
+
+// Reboot the device
+void handleReboot() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Rebooting...</title>";
+  html += "<style>body{background:#1a1a2e;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}";
+  html += ".msg{text-align:center;}</style></head><body>";
+  html += "<div class='msg'><h1>Rebooting...</h1>";
+  html += "<p>Please reconnect to the WiFi network:</p>";
+  html += "<p style='font-size:1.5em;color:#667eea;'>" + escapeHtml(ap_ssid) + "</p>";
+  html += "<p>Then navigate to <strong>192.168.4.1</strong></p>";
+  html += "</div></body></html>";
+  server.send(200, "text/html", html);
+
+  delay(1000);  // Give time for response to send
+  ESP.restart();
+}
+
 // JSON API for status (for potential future AJAX updates)
 void handleApiStatus() {
   String json = "{";
@@ -914,18 +1150,36 @@ void handleApiStatus() {
 
 void handleStart() {
   Serial.println("=== STARTING GAME ===");
+
+  if (countdownEnabled && countdownSeconds > 0) {
+    // Start countdown instead of immediate game start
+    Serial.printf("Starting countdown: %d seconds\n", countdownSeconds);
+    countdownActive = true;
+    countdownStartTime = millis();
+    countdownStep = countdownSeconds;
+    updateDisplay();
+  } else {
+    // Immediate game start (no countdown)
+    startGameNow();
+  }
+
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "Game Started!");
+}
+
+// Helper function to actually start the game (called after countdown or immediately)
+void startGameNow() {
   gameActive = true;
   winnerTeam = -1;
   gameStartTime = millis();
   winnerTime = 0;
-  
+  countdownActive = false;
+
   // Send start signal to all configured buttons
   Serial.println("Sending game start messages to all configured teams...");
   sendButtonResponses();
-  
+
   updateDisplay();
-  server.sendHeader("Location", "/");
-  server.send(302, "text/plain", "Game Started!");
 }
 
 void handleReset() {
@@ -945,12 +1199,13 @@ void handleReset() {
 
 void handleStop() {
   gameActive = false;
+  countdownActive = false;  // Cancel any active countdown
   winnerTeam = -1;
   winnerTime = 0;
-  
+
   // Send stop signal to all configured buttons
   sendButtonResponses();
-  
+
   updateDisplay();
   server.sendHeader("Location", "/");
   server.send(302, "text/plain", "Game Stopped!");
@@ -1098,6 +1353,17 @@ void saveConfig() {
                   teams[i].isConfigured ? "configured" : "not configured");
   }
 
+  // Save countdown settings
+  configFile.println(countdownEnabled ? "1" : "0");
+  configFile.println(countdownSeconds);
+  Serial.printf("  Countdown: %s, %d seconds\n",
+                countdownEnabled ? "enabled" : "disabled", countdownSeconds);
+
+  // Save WiFi settings
+  configFile.println(ap_ssid);
+  configFile.println(ap_password);
+  Serial.printf("  WiFi SSID: %s\n", ap_ssid.c_str());
+
   // CRITICAL: Flush data to SD card before closing
   configFile.flush();
   Serial.println("Flushed data to SD card");
@@ -1174,6 +1440,39 @@ void loadConfig() {
                     teams[i].mac[3], teams[i].mac[4], teams[i].mac[5],
                     teams[i].isConfigured ? "configured" : "not configured");
     }
+
+    // Load countdown settings (if available, for backward compatibility)
+    if (configFile.available()) {
+      String countdownEnabledStr = configFile.readStringUntil('\n');
+      countdownEnabled = (countdownEnabledStr.toInt() == 1);
+    }
+    if (configFile.available()) {
+      String countdownSecondsStr = configFile.readStringUntil('\n');
+      int secs = countdownSecondsStr.toInt();
+      if (secs >= 1 && secs <= 5) {
+        countdownSeconds = secs;
+      }
+    }
+    Serial.printf("  Countdown: %s, %d seconds\n",
+                  countdownEnabled ? "enabled" : "disabled", countdownSeconds);
+
+    // Load WiFi settings (if available)
+    if (configFile.available()) {
+      String ssid = configFile.readStringUntil('\n');
+      ssid.trim();
+      if (ssid.length() > 0 && ssid.length() <= 32) {
+        ap_ssid = ssid;
+      }
+    }
+    if (configFile.available()) {
+      String pass = configFile.readStringUntil('\n');
+      pass.trim();
+      if (pass.length() >= 8 && pass.length() <= 63) {
+        ap_password = pass;
+      }
+    }
+    Serial.printf("  WiFi SSID: %s\n", ap_ssid.c_str());
+
     Serial.println("=== Configuration Loaded Successfully ===");
   } else {
     Serial.println("ERROR: Team count mismatch! Config file may be corrupted.");

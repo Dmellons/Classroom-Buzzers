@@ -7,6 +7,18 @@ This is an ESP32-C6 based quiz buzzer system with:
 - **Button Units**: Battery-powered wireless buzzers with OLED display, speaker, and battery monitoring
 - **Communication**: ESP-NOW protocol for ultra-low latency (<10ms)
 
+### System Capabilities
+- Support for 1-9 wireless button units
+- Millisecond-precision response time measurement
+- Automatic button discovery (no manual MAC entry required)
+- Persistent configuration via SD card
+- Individual team mute control
+- Configurable countdown timer (1-5 seconds)
+- Web interface for easy configuration
+- Physical buttons for game control
+- Battery monitoring with percentage display
+- Audio feedback for all game states
+
 ---
 
 ## BASE STATION COMPONENTS
