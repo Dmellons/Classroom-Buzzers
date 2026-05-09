@@ -1,5 +1,6 @@
 #include <esp_now.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -17,6 +18,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define BUTTON_PIN 15 // Button input pin
 #define STATUS_LED_PIN 2 // Built-in LED for status (optional)
 #define SPEAKER_PIN 8 // PWM pin for 3W speaker
+#define BATTERY_PIN 1 // ADC pin for battery voltage monitoring (GPIO1/A0)
 
 // Base station MAC address
 uint8_t baseStationMAC[] = BASE_STATION_MAC;
@@ -43,6 +45,7 @@ enum ButtonState {
 
 ButtonState currentState = WAITING;
 String teamName = ""; // Team name received from base station
+uint16_t responseTimeMs = 0; // Response time in ms (received from base station for winner)
 
 // Debug counters for OLED display
 int buttonPressCount = 0;
@@ -54,24 +57,57 @@ ButtonState lastState = WAITING;
 // Audio settings
 bool audioMuted = false;
 
+// Battery monitoring
+float batteryVoltage = 0.0;
+int batteryPercent = 0;
+unsigned long lastBatteryRead = 0;
+const unsigned long batteryReadInterval = 30000; // Read battery every 30 seconds
+
+// Connection tracking
+#define CONNECTION_TIMEOUT_MS 15000  // Consider disconnected after 15 seconds
+#define LOW_BATTERY_THRESHOLD 15     // Show warning when battery < 15%
+bool isConnected = false;
+unsigned long lastBaseStationMsg = 0;
+
 // Interrupt handler for button press
 void IRAM_ATTR buttonISR() {
   buttonPressed = true;
 }
 
 // ESP-NOW callback for receiving data from base station
+// Message format:
+//   Byte 0: Status code (0=stopped, 1=winner, 2=locked, 3=ready)
+//   Byte 1: Mute flag (0=unmuted, 1=muted)
+//   Bytes 2-3: Response time in ms (uint16_t, little-endian)
+//   Bytes 4-31: Team name (up to 27 chars + null terminator)
 void onDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
   if (len < 1) return;
-  
+
+  // Track connection status
+  lastBaseStationMsg = millis();
+  isConnected = true;
+
   uint8_t response = incomingData[0];
   messagesReceived++; // Count messages received
-  
-  // Extract mute flag and team name if message is long enough
-  if (len > 2) {
+
+  // Extract mute flag, response time, and team name if message is long enough
+  if (len >= 4) {
+    audioMuted = (incomingData[1] == 1);
+
+    // Extract response time (uint16_t, little-endian)
+    responseTimeMs = incomingData[2] | (incomingData[3] << 8);
+
+    // Team name starts at byte 4
+    teamName = String((char*)&incomingData[4]);
+    teamName.trim(); // Remove any trailing whitespace
+    Serial.printf("Received team name: '%s', muted: %s, responseTime: %dms\n",
+                  teamName.c_str(), audioMuted ? "YES" : "NO", responseTimeMs);
+  } else if (len > 2) {
+    // Backwards compatibility with old message format (just mute + team name)
     audioMuted = (incomingData[1] == 1);
     teamName = String((char*)&incomingData[2]);
-    teamName.trim(); // Remove any trailing whitespace
-    Serial.printf("Received team name: '%s', muted: %s\n", teamName.c_str(), audioMuted ? "YES" : "NO");
+    teamName.trim();
+    Serial.printf("Received team name (old format): '%s', muted: %s\n", teamName.c_str(), audioMuted ? "YES" : "NO");
   }
   
   // Debug: Print received message
@@ -122,69 +158,141 @@ void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
   Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
 }
 
+// Draw battery icon in top-right corner
+void drawBatteryIcon(int x, int y, int percent) {
+  // Battery outline (12x6 pixels)
+  display.drawRect(x, y, 10, 6, SSD1306_WHITE); // Main body
+  display.drawRect(x + 10, y + 2, 2, 2, SSD1306_WHITE); // Terminal
+
+  // Fill battery based on percentage
+  if (percent > 75) {
+    display.fillRect(x + 1, y + 1, 8, 4, SSD1306_WHITE); // Full
+  } else if (percent > 50) {
+    display.fillRect(x + 1, y + 1, 6, 4, SSD1306_WHITE); // 75%
+  } else if (percent > 25) {
+    display.fillRect(x + 1, y + 1, 4, 4, SSD1306_WHITE); // 50%
+  } else if (percent > 10) {
+    display.fillRect(x + 1, y + 1, 2, 4, SSD1306_WHITE); // 25%
+  }
+  // If <= 10%, show empty battery (outline only)
+
+  // Show percentage text next to battery
+  display.setCursor(x - 18, y);
+  display.setTextSize(1);
+  if (percent < 100) {
+    display.print(" ");
+  }
+  display.print(percent);
+  display.print("%");
+}
+
+// Helper: Draw connection indicator icon
+void drawConnectionIcon(int x, int y, bool connected) {
+  if (connected) {
+    // Filled WiFi-like icon (3 arcs)
+    display.fillCircle(x + 3, y + 5, 1, SSD1306_WHITE);  // Center dot
+    display.drawLine(x + 1, y + 3, x + 5, y + 3, SSD1306_WHITE);  // Arc 1
+    display.drawLine(x, y + 1, x + 6, y + 1, SSD1306_WHITE);      // Arc 2
+  } else {
+    // Outline only (disconnected)
+    display.drawCircle(x + 3, y + 5, 1, SSD1306_WHITE);
+    display.drawPixel(x + 2, y + 3, SSD1306_WHITE);
+    display.drawPixel(x + 4, y + 3, SSD1306_WHITE);
+    // X mark to show disconnected
+    display.drawLine(x, y, x + 6, y + 6, SSD1306_WHITE);
+    display.drawLine(x + 6, y, x, y + 6, SSD1306_WHITE);
+  }
+}
+
 void updateDisplay() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  
-  // Show current state
+
+  // --- TOP STATUS BAR (line 0, 8px height) ---
+  // Connection indicator at top-left
+  drawConnectionIcon(0, 0, isConnected);
+
+  // Low battery warning in center of status bar
+  if (batteryPercent < LOW_BATTERY_THRESHOLD) {
+    display.setCursor(12, 0);
+    display.print("! LOW BAT");
+  }
+
+  // Battery indicator in top-right corner
+  drawBatteryIcon(110, 0, batteryPercent);
+
+  // --- MAIN CONTENT (lines 1-3, 24px) ---
   switch (currentState) {
     case WAITING:
-      if (teamName.length() > 0) {
-        // Connected - show team name prominently
+      if (teamName.length() > 0 && isConnected) {
+        // Connected with team name - show name large
+        display.setCursor(0, 10);
         display.setTextSize(2);
-        display.println(teamName.c_str());
+        // Truncate long names (10 chars max at size 2)
+        String dispName = teamName.substring(0, 10);
+        display.println(dispName.c_str());
         display.setTextSize(1);
-        display.println("");
-        display.println("Ready to play!");
+        display.print("  Ready to play!");
       } else {
-        // Not connected - show connection info and debug
+        // Not connected or no team name - show debug info
         String mac = WiFi.macAddress();
         mac.toUpperCase();
+        display.setCursor(10, 8);
         display.printf("MAC:%s\n", mac.c_str());
-        display.printf("HB:%s Msg:%d\n", heartbeatSuccess ? "OK" : "FAIL", messagesReceived);
-        display.printf("BtnPress:%d Sent:%d\n", buttonPressCount, messagesSent);
+        display.printf(" HB:%s M:%d Btn:%d\n",
+                       heartbeatSuccess ? "OK" : "X",
+                       messagesReceived, buttonPressCount);
+        display.print(" Waiting for base...");
       }
       break;
-      
+
     case READY:
-      // Show team name and ready status
-      display.setTextSize(1);
-      if (teamName.length() > 0) {
-        display.println(teamName.c_str());
-      }
+      // Large READY with team name
       display.setTextSize(2);
-      display.println("READY!");
+      if (teamName.length() > 0) {
+        // Center the team name
+        String dispName = teamName.substring(0, 10);
+        int16_t x1, y1;
+        uint16_t w, h;
+        display.getTextBounds(dispName.c_str(), 0, 0, &x1, &y1, &w, &h);
+        display.setCursor((SCREEN_WIDTH - w) / 2, 9);
+        display.println(dispName.c_str());
+      } else {
+        display.setCursor(20, 9);
+        display.println("READY!");
+      }
       display.setTextSize(1);
-      display.println("Press to buzz");
+      display.setCursor(32, 25);
+      display.print("Press now!");
       break;
-      
+
     case WINNER:
-      // Show team name and winner status
-      display.setTextSize(1);
-      if (teamName.length() > 0) {
-        display.println(teamName.c_str());
-      }
+      // Large WINNER with response time
       display.setTextSize(2);
+      display.setCursor(16, 9);
       display.println("WINNER!");
       display.setTextSize(1);
-      display.println("You got it!");
-      break;
-      
-    case LOCKED_OUT:
-      // Show team name and locked status
-      display.setTextSize(1);
-      if (teamName.length() > 0) {
-        display.println(teamName.c_str());
+      if (responseTimeMs > 0) {
+        display.setCursor(32, 25);
+        display.printf("Time: %dms", responseTimeMs);
+      } else {
+        display.setCursor(32, 25);
+        display.print("You got it!");
       }
+      break;
+
+    case LOCKED_OUT:
+      // Large LOCKED
       display.setTextSize(2);
+      display.setCursor(20, 9);
       display.println("LOCKED");
       display.setTextSize(1);
-      display.println("Too late!");
+      display.setCursor(36, 25);
+      display.print("Too late!");
       break;
   }
-  
+
   display.display();
 }
 
@@ -244,6 +352,59 @@ void playStartupSound() {
   playTone(330, 150); // E
   playTone(392, 150); // G
   playTone(523, 200); // C (high)
+}
+
+// Battery monitoring constants
+#define BATTERY_SAMPLE_COUNT 10   // Number of ADC samples to average
+#define BATTERY_SAMPLE_DELAY 5    // Delay between samples in ms
+
+// Battery monitoring functions
+float readBatteryVoltage() {
+  // Average multiple ADC readings for more stable results
+  long rawSum = 0;
+  for (int i = 0; i < BATTERY_SAMPLE_COUNT; i++) {
+    rawSum += analogRead(BATTERY_PIN);
+    delay(BATTERY_SAMPLE_DELAY);
+  }
+  int rawValue = rawSum / BATTERY_SAMPLE_COUNT;
+
+  // Convert ADC reading to voltage
+  // ESP32-C6 ADC: 12-bit (0-4095), reference voltage ~3.3V
+  // With 11dB attenuation, max measurable voltage is ~3.3V
+  float adcVoltage = (rawValue / 4095.0) * 3.3;
+
+  // Voltage divider uses two 47kΩ resistors (divides by 2)
+  // So actual battery voltage is double the ADC voltage
+  float batteryVoltage = adcVoltage * 2.0;
+
+  return batteryVoltage;
+}
+
+int calculateBatteryPercent(float voltage) {
+  // LiPo battery voltage range:
+  // 4.2V = 100% (fully charged)
+  // 3.7V = 50% (nominal)
+  // 3.0V = 0% (empty, cutoff)
+
+  const float maxVoltage = 4.2;
+  const float minVoltage = 3.0;
+
+  // Clamp voltage to valid range
+  if (voltage >= maxVoltage) return 100;
+  if (voltage <= minVoltage) return 0;
+
+  // Calculate percentage
+  float percent = ((voltage - minVoltage) / (maxVoltage - minVoltage)) * 100.0;
+
+  return (int)percent;
+}
+
+void updateBatteryLevel() {
+  batteryVoltage = readBatteryVoltage();
+  batteryPercent = calculateBatteryPercent(batteryVoltage);
+
+  // Debug output
+  Serial.printf("Battery: %.2fV (%d%%)\n", batteryVoltage, batteryPercent);
 }
 
 // LED patterns for different states (using built-in LED)
@@ -337,32 +498,39 @@ void setup() {
   
   // Configure speaker pin
   pinMode(SPEAKER_PIN, OUTPUT);
-  
-  // Set device as Wi-Fi station
+
+  // Configure battery monitoring pin
+  pinMode(BATTERY_PIN, INPUT);
+  analogReadResolution(12); // Set ADC resolution to 12 bits (0-4095)
+  analogSetAttenuation(ADC_11db); // Set attenuation for full 3.3V range
+
+  // Set device as Wi-Fi station on channel 1 (must match base station)
   WiFi.mode(WIFI_STA);
-  
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+
   // Print MAC address for registration with base station
   Serial.print("Button MAC Address: ");
   String macForSerial = WiFi.macAddress();
   macForSerial.toUpperCase();
   Serial.println(macForSerial);
-  
+
   // Initialize ESP-NOW
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW init failed");
     return;
   }
-  
+
   // Register callbacks
   esp_now_register_send_cb(onDataSent);
   esp_now_register_recv_cb(onDataRecv);
-  
-  // Register base station as peer
+
+  // Register base station as peer (channel 1 to match AP)
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, baseStationMAC, 6);
-  peerInfo.channel = 0;
+  peerInfo.channel = 1;  // Must match base station AP channel
   peerInfo.encrypt = false;
-  
+  peerInfo.ifidx = WIFI_IF_STA;  // Use STA interface
+
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
     Serial.println("Failed to add peer");
     return;
@@ -376,9 +544,12 @@ void setup() {
   
   // Play startup sound
   playStartupSound();
-  
+
+  // Read initial battery level
+  updateBatteryLevel();
+
   Serial.println("Button Ready");
-  Serial.println("Breadboard version - USB powered with 3W speaker");
+  Serial.println("Battery powered version with voltage monitoring");
   
   // Print base station MAC we're trying to connect to
   Serial.print("Base Station MAC: ");
@@ -411,9 +582,9 @@ void loop() {
       // Only send buzz if in READY state
       if (currentState == READY) {
         Serial.println("Button pressed - sending buzz");
-        playBuzzSound(); // Immediate audio feedback
-        sendBuzzer();
+        sendBuzzer(); // Send immediately for lowest latency
         messagesSent++;
+        playBuzzSound(); // Play sound after sending (local feedback only)
         
         // Brief LED flash to acknowledge press
         setStatusLED(true);
@@ -444,7 +615,19 @@ void loop() {
     sendHeartbeat();
     lastHeartbeat = currentTime;
   }
-  
+
+  // Check connection timeout
+  if (isConnected && (currentTime - lastBaseStationMsg > CONNECTION_TIMEOUT_MS)) {
+    isConnected = false;
+    updateDisplay();  // Update display to show disconnected
+  }
+
+  // Read battery level periodically
+  if (currentTime - lastBatteryRead > batteryReadInterval) {
+    updateBatteryLevel();
+    lastBatteryRead = currentTime;
+  }
+
   // Update LED pattern based on current state
   static unsigned long lastLedUpdate = 0;
   static unsigned long lastDisplayUpdate = 0;

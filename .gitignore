@@ -11,3 +11,5 @@ dist/
 !components-list.md
 !README.md
 tests/
+.claude/*
+.claude*

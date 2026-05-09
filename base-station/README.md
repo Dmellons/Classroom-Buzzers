@@ -10,6 +10,7 @@ The base station is the central hub of the quiz buzzer system. It receives butto
 | 128x64 OLED Display (I2C) | 1 | SSD1306 chip, 0x3C address |
 | MicroSD Card Module | 1 | SPI interface |
 | MicroSD Card | 1 | Any size, formatted FAT32 |
+| Momentary Push Buttons | 2 | For Start/Stop and Reset controls |
 | USB Cable | 1 | For power (5V) |
 | Jumper Wires | Various | For connections |
 
@@ -44,6 +45,27 @@ GPIO5 (CS)      →    CS
 3.3V            →    VCC
 GND             →    GND
 ```
+
+### Physical Control Buttons
+```
+ESP32-C6 Pin    →    Button Connection
+GPIO10          →    Start/Stop Button (one side)
+GPIO1           →    Reset Button (one side)
+GND             →    Both buttons (other side)
+```
+
+**Button Wiring Details:**
+- Both buttons use internal pull-up resistors (no external resistor needed)
+- Wire one side of each button to its respective GPIO pin
+- Wire the other side of both buttons to any ESP32 GND pin
+- Buttons are active LOW (pressed = LOW, released = HIGH)
+- Built-in debouncing with 250ms delay
+
+**Button Functions:**
+- **Start/Stop (GPIO10)**: Toggles between game active/stopped states
+- **Reset (GPIO1)**: Resets the current round (clears winner)
+
+⚠️ **Note**: Avoid GPIO0 (boot mode), GPIO3 (JTAG), and GPIO9 (boot strapping) for buttons as they have special functions on ESP32 boards.
 
 ### WS2812B LED Strip (Optional)
 ```
@@ -129,11 +151,11 @@ Base Station MAC Address: AA:BB:CC:DD:EE:FF
 2. The OLED should display:
    ```
    Quiz Buzzer System
-   
+
    WiFi: QuizBuzzer-Setup
    IP: 192.168.4.1
-   
-   Teams (4):
+
+   Teams (9):
    1. Team 1
    2. Team 2
    3. Team 3
@@ -156,38 +178,56 @@ Base Station MAC Address: AA:BB:CC:DD:EE:FF
    ```
    Quiz Buzzer System
    [Config Loaded]
-   
+
    WiFi: QuizBuzzer-Setup
    IP: 192.168.4.1
-   
-   Teams (4):
+
+   Teams (9):
    1. Team Alpha
    2. Team Beta
    3. Team Gamma
+   4. Team Delta
    ...
    ```
 
 ## 🎮 Operating the System
 
+You can control the base station using **either** the web interface or the physical buttons.
+
 ### Web Interface Controls
 
-The web interface at `192.168.4.1` provides these buttons:
+The web interface at `192.168.4.1` provides these controls:
 
 - **START GAME** - Activates buzzer system, OLED shows "READY!"
 - **RESET ROUND** - Clears current winner, ready for next question
 - **STOP GAME** - Deactivates buzzer system
-- **Save Configuration** - Saves team names and MAC addresses to SD card
+- **Mute Toggle** - Each team has individual mute control to silence their button's audio feedback
+- **Save Configuration** - Saves team names, MAC addresses, and mute settings to SD card
+
+### Physical Button Controls
+
+Two physical buttons are wired to the base station for quick game control:
+
+- **Start/Stop Button (GPIO10)** - Toggles game between active and stopped states
+  - Press when stopped → Starts the game
+  - Press when active → Stops the game
+- **Reset Button (GPIO1)** - Resets the current round
+  - Clears the winner
+  - Resets response timer
+  - Only sends updates when game is active
+
+Both control methods work identically and can be used interchangeably during gameplay.
 
 ### Game Flow
 
-1. Click **START GAME**
+1. **Start the game** (web or physical button)
 2. OLED displays "READY!" in large text
 3. First button press:
    - Button LED stays on
    - OLED displays "WINNER: [Team Name]"
    - Other buttons are locked out (LEDs off)
-4. Click **RESET ROUND** to clear and play again
-5. Click **STOP GAME** when finished
+4. **Reset round** to clear and play again (web or physical button)
+5. **Stop game** when finished (web or physical button)
 
 ## 📊 Data Logging
 
@@ -206,16 +246,27 @@ File: `config.txt`
 The system automatically saves and loads your configuration on every boot. When you save settings via the web interface, they're written to `config.txt`:
 
 ```
-4
+9
 Team Alpha
-AA:BB:CC:DD:EE:01,0,0,0,0,0
+A4,B2,31,F0,12,34
+1
+0
 Team Beta
-AA:BB:CC:DD:EE:02,0,0,0,0,0
+A4,B2,31,F0,12,35
+1
+0
 Team Gamma
-AA:BB:CC:DD:EE:03,0,0,0,0,0
-Team Delta
-AA:BB:CC:DD:EE:04,0,0,0,0,0
+A4,B2,31,F0,12,36
+1
+0
+...
 ```
+
+Format per team:
+- Line 1: Team name
+- Line 2: MAC address (comma-separated hex bytes)
+- Line 3: Configuration status (1 = configured, 0 = not configured)
+- Line 4: Mute status (1 = muted, 0 = not muted)
 
 **Auto-Load Feature:**
 - Configuration is automatically loaded on every power-up
@@ -294,7 +345,11 @@ const char* ap_password = "your_secure_password_here";
 ## 📝 Customization
 
 ### Change Number of Teams
-Default is 4, max is 9. Adjust in code or via web interface.
+Default is now 9 teams. To change this, edit `MAX_TEAMS` in the code (base-station.ino:54):
+```cpp
+#define MAX_TEAMS 9  // Change to any value 1-9
+```
+You don't need to use all 9 slots - simply configure only the teams you need via the web interface.
 
 ### Change WiFi SSID
 Edit line 17:
