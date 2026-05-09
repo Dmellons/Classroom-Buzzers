@@ -163,24 +163,17 @@ You will need to create two secret files - one for the base station and one for 
 - Check that base station MAC is correctly set in button code
 - Verify all grounds are connected in button circuit
 
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
-- Built on the ESP32 Arduino Core
+- Built on the ESP32
 - Uses Adafruit GFX and SSD1306 libraries for display
 - Inspired by classic quiz show buzzer systems
 
-## 📧 Contact
-
-For questions or support, please open an issue on GitHub.
 
 ---
 
-**Made with ❤️ for quiz enthusiasts, trivia nights, and game shows everywhere!**
+**Made with ❤️ for my wife, Mrs. J**
