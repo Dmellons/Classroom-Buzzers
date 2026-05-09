@@ -272,14 +272,16 @@ module top_half() {
 
 // Option 1: Show assembled (for visualization)
 // color("DarkSlateGray") bottom_half();
-// color("SlateGray") translate([0, 0, bottom_height + 5]) top_half();
+// color("SlateGray") translate([0, 0, bottom_height + 5]) 
+//top_half();
 
 // Option 2: Bottom half only (for printing)
-bottom_half();
+// bottom_half();
 
 // Option 3: Top half only (for printing - flip in slicer)
 // translate([0, 0, lid_height]) rotate([180, 0, 0]) top_half();
 
 // Option 4: Both parts side by side (for single print plate)
-// bottom_half();
-// translate([outer_width + 10, 0, lid_height]) rotate([180, 0, 0]) top_half();
+ bottom_half();
+translate([outer_width + 10, 0, lid_height]) rotate([180, 0, 0]) 
+top_half();
