@@ -6,14 +6,20 @@ datasheets.
 
 ## Files
 
-| File | Purpose | Footprint | Height |
-|------|---------|-----------|--------|
-| `buzzer-bottom.stl` | Buzzer body — holds ESP32, battery, TP4056, boost, speaker | 85 × 105 mm | 32.5 mm |
-| `buzzer-top.stl` | Buzzer lid — 28 mm arcade-button hole | 85 × 105 mm | 17 mm (15 + 2 mm lip) |
-| `base-desktop-bottom.stl` | Desktop teacher/host body | 115 × 85 mm | 34.5 mm |
-| `base-desktop-top.stl` | Desktop teacher/host lid (2 buttons) | 115 × 85 mm | 17 mm |
-| `base-handheld-back.stl` | Handheld remote-style back half | 60 × 160 mm | 14 mm |
-| `base-handheld-front.stl` | Handheld remote-style front (display + buttons) | 60 × 160 mm | 16 mm |
+Each STL has a matching `.png` preview rendered in Blender Cycles
+(3/4 elevated view) so you can sanity-check the geometry before slicing.
+
+| Part | STL | Preview | Footprint | Height |
+|------|-----|---------|-----------|--------|
+| Buzzer body (open top, holds ESP32 / battery / TP4056 / boost / speaker) | `buzzer-bottom.stl` | ![bottom](buzzer-bottom.png) | 85 × 105 mm | 32.5 mm |
+| Buzzer lid (28 mm arcade-button hole) | `buzzer-top.stl` | ![top](buzzer-top.png) | 85 × 105 mm | 17 mm |
+| Desktop base body | `base-desktop-bottom.stl` | ![dbot](base-desktop-bottom.png) | 115 × 85 mm | 34.5 mm |
+| Desktop base lid (2× 12 mm buttons) | `base-desktop-top.stl` | ![dtop](base-desktop-top.png) | 115 × 85 mm | 17 mm |
+| Handheld back (USB-C + microSD) | `base-handheld-back.stl` | ![hback](base-handheld-back.png) | 60 × 160 mm | 14 mm |
+| Handheld front (display + 2 buttons) | `base-handheld-front.stl` | ![hfront](base-handheld-front.png) | 60 × 160 mm | 16 mm |
+
+To regenerate previews after editing geometry, pipe `render_previews.py`
+through the Blender MCP socket (port 9876).
 
 Verified valid (manifold) on import. Two minor non-manifold edges on
 `buzzer-bottom.stl` are at the lip seam — slicers handle this fine; if you
