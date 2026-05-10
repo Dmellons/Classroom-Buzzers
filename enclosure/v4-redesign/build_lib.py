@@ -333,6 +333,139 @@ def _build_wedge_via_boolean(name, w, d, h_front, h_back, wall, angle):
 
 
 # ---------------------------------------------------------------------------
+# Pistol-grip outline (v5)
+# ---------------------------------------------------------------------------
+
+def make_pistol_outline(name, head_w, head_d, taper_len, grip_w, grip_d,
+                        height, corner_r=5, taper_r=2,
+                        loc=(0, 0, 0), arc_segs=8):
+    """Build a pistol/wand-grip extrusion.
+       y axis: 0 = bottom of grip (lanyard end), increasing toward head.
+       Symmetric about x = head_w/2 centerline.
+       Total length = grip_d + taper_len + head_d.
+
+       Outline (CCW starting bottom-left of grip):
+         (head_w-grip_w)/2,    0
+         (head_w+grip_w)/2,    0
+         (head_w+grip_w)/2,    grip_d
+         head_w,               grip_d + taper_len
+         head_w,               grip_d + taper_len + head_d
+         0,                    grip_d + taper_len + head_d
+         0,                    grip_d + taper_len
+         (head_w-grip_w)/2,    grip_d
+
+       corner_r = radius of head/grip outer corners (4 corners)
+       taper_r  = small fillet at taper transition (4 corners)
+    """
+    inset = (head_w - grip_w) / 2  # X distance grip is inset from head edge
+    total_d = grip_d + taper_len + head_d
+
+    # 8 corner points, with corner type: 'R'=corner_r, 'T'=taper_r
+    raw_pts = [
+        ((inset, 0),                              corner_r, 'R'),  # 0 grip BL
+        ((inset + grip_w, 0),                     corner_r, 'R'),  # 1 grip BR
+        ((inset + grip_w, grip_d),                taper_r,  'T'),  # 2 transition R-bottom
+        ((head_w,         grip_d + taper_len),    taper_r,  'T'),  # 3 head BR
+        ((head_w,         total_d),               corner_r, 'R'),  # 4 head TR
+        ((0,              total_d),               corner_r, 'R'),  # 5 head TL
+        ((0,              grip_d + taper_len),    taper_r,  'T'),  # 6 head BL
+        ((inset,          grip_d),                taper_r,  'T'),  # 7 transition L-bottom
+    ]
+
+    # For each corner, replace it with a small arc using its incoming and
+    # outgoing edges. Compute arc center along the bisector at distance r.
+    n = len(raw_pts)
+    pts_2d = []
+    for i in range(n):
+        (px, py), r, _ = raw_pts[i]
+        # Previous and next vertices (raw, no rounding)
+        prev = raw_pts[(i - 1) % n][0]
+        nxt = raw_pts[(i + 1) % n][0]
+        # Direction vectors
+        v_in = (px - prev[0], py - prev[1])
+        v_out = (nxt[0] - px, nxt[1] - py)
+        len_in = math.hypot(*v_in)
+        len_out = math.hypot(*v_out)
+        if len_in < 1e-6 or len_out < 1e-6 or r <= 0:
+            pts_2d.append((px, py))
+            continue
+        u_in = (v_in[0] / len_in, v_in[1] / len_in)
+        u_out = (v_out[0] / len_out, v_out[1] / len_out)
+        # Inset along incoming edge (back from corner) and outgoing edge
+        p_a = (px - u_in[0] * r, py - u_in[1] * r)
+        p_b = (px + u_out[0] * r, py + u_out[1] * r)
+        # Arc center: intersect normals at p_a (perp to u_in) and p_b (perp to u_out)
+        # Normal pointing into polygon. For convex CCW corners, normal is
+        # (u_in.y, -u_in.x) rotated 90 CW (inward).
+        # Use parametric: center = p_a + t * (-u_in.y, u_in.x) where the
+        # rotation choice depends on convexity. Cross product test:
+        cross = u_in[0] * u_out[1] - u_in[1] * u_out[0]
+        if abs(cross) < 1e-6:
+            pts_2d.append((px, py))
+            continue
+        # Normal turns toward interior:
+        n_a = (-u_in[1], u_in[0]) if cross > 0 else (u_in[1], -u_in[0])
+        n_b = (-u_out[1], u_out[0]) if cross > 0 else (u_out[1], -u_out[0])
+        # Solve p_a + t*n_a = p_b + s*n_b
+        # Using 2D linear solve:
+        # n_a[0]*t - n_b[0]*s = p_b[0] - p_a[0]
+        # n_a[1]*t - n_b[1]*s = p_b[1] - p_a[1]
+        det = n_a[0] * (-n_b[1]) - (-n_b[0]) * n_a[1]
+        if abs(det) < 1e-9:
+            pts_2d.append((px, py))
+            continue
+        rhs = (p_b[0] - p_a[0], p_b[1] - p_a[1])
+        t = (rhs[0] * (-n_b[1]) - (-n_b[0]) * rhs[1]) / det
+        cx = p_a[0] + t * n_a[0]
+        cy = p_a[1] + t * n_a[1]
+        # Now sweep arc from p_a to p_b around (cx, cy)
+        ang_a = math.atan2(p_a[1] - cy, p_a[0] - cx)
+        ang_b = math.atan2(p_b[1] - cy, p_b[0] - cx)
+        # Choose sweep direction matching CCW polygon
+        d_ang = ang_b - ang_a
+        if cross > 0:
+            # CCW: sweep increasing
+            if d_ang < 0:
+                d_ang += 2 * math.pi
+        else:
+            if d_ang > 0:
+                d_ang -= 2 * math.pi
+        for k in range(arc_segs + 1):
+            a = ang_a + d_ang * (k / arc_segs)
+            pts_2d.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+
+    # Dedupe consecutive
+    deduped = []
+    for p in pts_2d:
+        if not deduped or (abs(p[0] - deduped[-1][0]) > 1e-6
+                           or abs(p[1] - deduped[-1][1]) > 1e-6):
+            deduped.append(p)
+    if len(deduped) >= 2 and (
+        abs(deduped[0][0] - deduped[-1][0]) < 1e-6
+        and abs(deduped[0][1] - deduped[-1][1]) < 1e-6
+    ):
+        deduped.pop()
+
+    # Build mesh
+    me = bpy.data.meshes.new(name + "_mesh")
+    bm = bmesh.new()
+    vs = [bm.verts.new((p[0], p[1], 0)) for p in deduped]
+    bm.faces.new(vs)
+    bm.normal_update()
+    geom = bmesh.ops.extrude_face_region(bm, geom=bm.faces[:])
+    ev = [v for v in geom["geom"] if isinstance(v, bmesh.types.BMVert)]
+    bmesh.ops.translate(bm, vec=Vector((0, 0, height)), verts=ev)
+    bm.normal_update()
+    bm.to_mesh(me)
+    bm.free()
+    obj = bpy.data.objects.new(name, me)
+    bpy.context.collection.objects.link(obj)
+    obj.location = loc
+    bpy.context.view_layer.objects.active = obj
+    return name
+
+
+# ---------------------------------------------------------------------------
 # Speaker grille (reused from v3)
 # ---------------------------------------------------------------------------
 

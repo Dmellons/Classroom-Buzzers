@@ -1,14 +1,14 @@
-"""Desktop teacher/host base — wedge form factor (v4).
+"""Desktop teacher/host base — wedge form factor (v5).
 Single-piece wedge that prints flat on its open back face.
-Front edge 25mm tall, back edge 45mm tall, depth 110mm, width 130mm.
-Top surface tilts ~10deg toward user, naturally angles the OLED display.
 
-Cutouts:
-  - OLED window 23 x 13mm through the angled top, perpendicular to surface
-  - 2x 12mm momentary buttons through angled top (with shape indicators)
-  - USB-C 12 x 8mm on rear (vertical) wall
-  - microSD 30 x 5mm on right wall
-  - 4 corner posts (M3 self-tap into 2.5mm pilot)
+CHANGED IN v5:
+- Upgraded to GMT020-02-8p 2.0" TFT (240x320). Window 31x41mm,
+  PCB pocket 38x63mm internal, 12.5mm clearance behind face.
+- Layout: landscape TFT on left, 2 buttons stacked vertically to
+  the right of the display (Start on top, Reset below).
+- Footprint widened to 140 x 110 to accommodate stacked buttons.
+- Bug fix: per-button cylinders are now created fresh per iteration
+  with no rotation state leak; both buttons render reliably.
 """
 
 import sys, os, math
@@ -21,178 +21,162 @@ if LIB not in sys.path:
     sys.path.insert(0, LIB)
 import build_lib as L
 import render_helper as R
-import bpy
+import bpy, bmesh
 from mathutils import Vector
 
-W = 130          # X — width
-D = 110          # Y — depth front-to-back
-H_FRONT = 25     # Z at Y=0
-H_BACK = 45      # Z at Y=D
+# Outer
+W = 140                 # X — width (was 130 in v4)
+D = 110                 # Y — depth front to back
+H_FRONT = 25
+H_BACK = 45
 WALL = 2.5
 R_OUT = 5
 
-OLED_W, OLED_H = 23, 13
+# GMT020-02-8p TFT (landscape orientation here)
+TFT_WINDOW_W = 41.2     # active 40.8 + tol (long axis along X)
+TFT_WINDOW_H = 31.0     # active 30.6 + tol (short axis along Y/slope)
+TFT_PCB_W = 63.0        # PCB outline + tol (long axis along X)
+TFT_PCB_H = 38.0        # PCB outline + tol (short axis along Y)
+TFT_DEPTH = 13.0        # internal clearance behind face
+TFT_X_CENTER_OFFSET = -25  # offset display LEFT of wedge X center
+
+# Buttons (stacked column to RIGHT of display)
+BTN_DIA = 12
+BTN_X_OFFSET = 35       # X offset from wedge center to button column
+BTN_SPACING = 26        # Y distance between the two buttons
+BTN_ROW_Y = D / 2       # Y center of the button column
+
+# Indicator deboss shapes (next to each button)
+TRIANGLE_SIZE = 6
+SQUARE_SIZE = 5
+INDICATOR_DEPTH = 0.6
+INDICATOR_OFFSET_X = 10  # shift indicator inward (toward display)
+
+# Other cutouts
 USBC_W, USBC_H = 12, 8
 USBC_Z = 8
 SD_SLOT_W, SD_SLOT_H = 30, 5
 SD_SLOT_Z = 12
 
-BTN_DIA = 12
-BTN_SPACING = 32         # X distance between the two button centers
-BTN_Y_FROM_FRONT = 22    # Y distance from front edge to button row (along top)
-
-# Indicator deboss shapes
-TRIANGLE_SIZE = 6        # Start indicator
-SQUARE_SIZE = 5          # Reset indicator
-INDICATOR_DEPTH = 0.6
-INDICATOR_OFFSET = 10    # X offset from button center to indicator center
-
 POST_OD = 6
 POST_HOLE = 2.5
 POST_INSET = 9
-POST_H_FRONT = H_FRONT - 8   # post height at front (shorter)
-POST_H_BACK = H_BACK - 8     # post height at back (taller)
 
 NAME = "base_desktop_wedge"
 
 
 def angled_top_z(y):
-    """Z coordinate of the angled top surface at given Y."""
     return H_FRONT + (H_BACK - H_FRONT) * (y / D)
 
 
 def build():
     L.reset_scene()
 
-    # Build the hollow wedge shell
+    # Hollow wedge shell
     L.make_wedge_shell("shell", w=W, d=D, h_front=H_FRONT, h_back=H_BACK,
                        r=R_OUT, wall=WALL)
 
-    slope_angle = math.atan2(H_BACK - H_FRONT, D)  # ~10deg
+    slope_angle = math.atan2(H_BACK - H_FRONT, D)
 
-    # --- Cutouts ---
-
-    # USB-C on back wall (vertical wall at Y=D)
+    # USB-C on rear (vertical) wall
     L.make_box("c_usbc", USBC_W, WALL + 2, USBC_H,
                loc=(W / 2 - USBC_W / 2, D - WALL - 1, USBC_Z))
     L.boolean("shell", "c_usbc")
 
-    # microSD on right wall (X=W)
+    # microSD on right wall
     L.make_box("c_sd", WALL + 2, SD_SLOT_W, SD_SLOT_H,
                loc=(W - WALL - 1, D / 2 - SD_SLOT_W / 2, SD_SLOT_Z))
     L.boolean("shell", "c_sd")
 
-    # OLED window — through angled top surface, perpendicular to surface
-    # Position: centered along X, around Y = D/2 + 10 (slightly back of center)
-    oled_y = D / 2 + 10
-    oled_top_z = angled_top_z(oled_y)
-    # Build cut box and rotate around X axis to align with slope
+    # ----- TFT window through angled top, perpendicular to surface -----
+    tft_x = W / 2 + TFT_X_CENTER_OFFSET
+    tft_y = D / 2 + 5
+    tft_z = angled_top_z(tft_y)
     cut_d = WALL + 4
-    L.make_box("c_oled", OLED_W, OLED_H, cut_d,
-               loc=(W / 2 - OLED_W / 2, -OLED_H / 2, -cut_d / 2))
-    co = bpy.data.objects["c_oled"]
+    L.make_box("c_tft", TFT_WINDOW_W, TFT_WINDOW_H, cut_d,
+               loc=(-TFT_WINDOW_W / 2, -TFT_WINDOW_H / 2, -cut_d / 2))
+    co = bpy.data.objects["c_tft"]
     co.rotation_mode = 'XYZ'
     co.rotation_euler = (slope_angle, 0, 0)
-    co.location = (W / 2, oled_y, oled_top_z)
+    co.location = (tft_x, tft_y, tft_z)
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=False)
-    L.boolean("shell", "c_oled")
+    L.boolean("shell", "c_tft")
 
-    # Buttons through angled top
-    btn_y = BTN_Y_FROM_FRONT
-    btn_top_z = angled_top_z(btn_y)
-    btn_xs = [W / 2 - BTN_SPACING / 2, W / 2 + BTN_SPACING / 2]
-    for i, bx in enumerate(btn_xs):
+    # ----- TWO BUTTONS, stacked to RIGHT of display -----
+    btn_x = W / 2 + BTN_X_OFFSET
+    button_centers_y = [BTN_ROW_Y + BTN_SPACING / 2,   # Start (top, toward back)
+                        BTN_ROW_Y - BTN_SPACING / 2]    # Reset (bottom, toward front)
+    button_positions = []
+    for i, by in enumerate(button_centers_y):
         n = f"c_btn_{i}"
-        L.make_cylinder(n, BTN_DIA / 2, H_BACK + 5,
-                        loc=(bx, btn_y, -2), axis='Z')
-        # Rotate cylinder to align with surface normal
+        # Build cylinder fresh, with axis Z, no prior rotation state.
+        # Then rotate around its own center to match the slope, and translate
+        # to place its midpoint at the angled top surface.
+        cyl_h = H_BACK + 6
+        L.make_cylinder(n, BTN_DIA / 2, cyl_h,
+                        loc=(0, 0, -cyl_h / 2), axis='Z')
         co = bpy.data.objects[n]
         co.rotation_mode = 'XYZ'
         co.rotation_euler = (slope_angle, 0, 0)
-        co.location = (bx, btn_y, btn_top_z - (H_BACK + 5) / 2 + 1)
-        # Adjust so cylinder spans through the wall and well into the cavity
-        bpy.ops.object.transform_apply(location=True, rotation=True, scale=False)
+        bz = angled_top_z(by)
+        co.location = (btn_x, by, bz)
+        bpy.ops.object.transform_apply(location=True, rotation=True,
+                                        scale=False)
         L.boolean("shell", n)
+        button_positions.append((btn_x, by, bz))
 
-    # Indicator deboss: triangle for left button (Start), square for right (Reset)
-    # These sit on the angled top surface beside each button hole.
-    # Left button: triangle indicator to its left (-X side)
-    # We approximate triangle with a thin triangular prism (3 verts -> face)
-    import bmesh
-    me_t = bpy.data.meshes.new("indicator_tri_mesh")
+    # ----- Indicator shapes next to each button -----
+    # Triangle next to Start (button 0, top)
+    me_t = bpy.data.meshes.new("tri_mesh")
     bm = bmesh.new()
     s = TRIANGLE_SIZE
-    v1 = bm.verts.new((-s/2, -s/2*0.866, 0))
-    v2 = bm.verts.new((s/2, -s/2*0.866, 0))
-    v3 = bm.verts.new((0, s/2*0.866, 0))
-    bm.faces.new([v1, v2, v3])
-    bm.normal_update()
+    bm.faces.new([
+        bm.verts.new((-s/2, -s/2*0.866, 0)),
+        bm.verts.new((s/2, -s/2*0.866, 0)),
+        bm.verts.new((0, s/2*0.866, 0)),
+    ])
     geom = bmesh.ops.extrude_face_region(bm, geom=bm.faces[:])
     ev = [v for v in geom["geom"] if isinstance(v, bmesh.types.BMVert)]
-    bmesh.ops.translate(bm, vec=Vector((0, 0, INDICATOR_DEPTH + 0.5)), verts=ev)
+    bmesh.ops.translate(bm, vec=Vector((0, 0, INDICATOR_DEPTH + 0.5)),
+                        verts=ev)
     bm.normal_update()
     bm.to_mesh(me_t)
     bm.free()
-    tri_obj = bpy.data.objects.new("c_tri", me_t)
-    bpy.context.collection.objects.link(tri_obj)
-    tri_obj.rotation_mode = 'XYZ'
-    tri_obj.rotation_euler = (slope_angle, 0, 0)
-    tri_obj.location = (btn_xs[0] - INDICATOR_OFFSET, btn_y,
-                        btn_top_z - INDICATOR_DEPTH / 2)
-    bpy.context.view_layer.objects.active = tri_obj
+    tri = bpy.data.objects.new("c_tri", me_t)
+    bpy.context.collection.objects.link(tri)
+    tri.rotation_mode = 'XYZ'
+    tri.rotation_euler = (slope_angle, 0, 0)
+    tx, ty, tz = button_positions[0]
+    tri.location = (tx - INDICATOR_OFFSET_X, ty, tz - INDICATOR_DEPTH / 2)
+    bpy.context.view_layer.objects.active = tri
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=False)
     L.boolean("shell", "c_tri")
 
-    # Right button: square indicator
+    # Square next to Reset (button 1, bottom)
     L.make_box("c_sq", SQUARE_SIZE, SQUARE_SIZE, INDICATOR_DEPTH + 0.5,
                loc=(-SQUARE_SIZE / 2, -SQUARE_SIZE / 2,
                     -(INDICATOR_DEPTH + 0.5) / 2))
     sq = bpy.data.objects["c_sq"]
     sq.rotation_mode = 'XYZ'
     sq.rotation_euler = (slope_angle, 0, 0)
-    sq.location = (btn_xs[1] + INDICATOR_OFFSET, btn_y,
-                   btn_top_z - INDICATOR_DEPTH / 2)
+    sx, sy, sz = button_positions[1]
+    sq.location = (sx - INDICATOR_OFFSET_X, sy, sz - INDICATOR_DEPTH / 2)
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=False)
     L.boolean("shell", "c_sq")
 
-    # --- Posts (M3 self-tap, varying height per corner since wedge floor is flat) ---
+    # ----- Mounting posts (4 corners) -----
     additions = []
     post_xs = [WALL + POST_INSET, W - WALL - POST_INSET]
-    post_corners = [
-        (post_xs[0], WALL + POST_INSET, H_FRONT - 8),
-        (post_xs[1], WALL + POST_INSET, H_FRONT - 8),
-        (post_xs[0], D - WALL - POST_INSET, H_BACK - 8),
-        (post_xs[1], D - WALL - POST_INSET, H_BACK - 8),
-    ]
-    for i, (px, py, ph) in enumerate(post_corners):
+    post_ys = [WALL + POST_INSET, D - WALL - POST_INSET]
+    for i, (px, py) in enumerate([(x, y) for x in post_xs for y in post_ys]):
         po = f"post_o_{i}"
-        phole = f"post_h_{i}"
-        L.make_cylinder(po, POST_OD / 2, ph, loc=(px, py, 0))  # post extends from floor
-        # Wait the wedge is OPEN-TOP so floor is the back face which is at Z=0?
-        # Actually wedge is built with rectangular footprint Z=0..H_BACK with
-        # outer back face at Z=H_BACK. There's no closed floor — the opening
-        # is at Y=D (the back wall). Hmm.
-        # Re-read: make_wedge_shell builds outer prism Z=0..h_back, slices off
-        # top with sloped plane, hollows interior. Open face is the back (Y=d).
-        # So the "floor" when assembled (resting on desk) is the bottom face
-        # at Z=0. Posts should go up FROM the bottom interior (Z=WALL) to
-        # the top interior surface (angled, at Z=angled_top_z(py) - WALL/cos).
-        # Recompute:
-        pass
-
-    # Redo posts: anchored to bottom interior floor (Z=WALL), height = ceiling - WALL
-    for i, (px, py, _) in enumerate(post_corners):
-        po = f"post_o_{i}"
-        phole = f"post_h_{i}"
-        # Remove already-created post if present
-        if po in bpy.data.objects:
-            bpy.data.objects.remove(bpy.data.objects[po], do_unlink=True)
-        ceiling_z = angled_top_z(py)
-        ph_actual = max(ceiling_z - WALL - WALL - 1, 5)  # leave 1mm gap below ceiling
-        L.make_cylinder(po, POST_OD / 2, ph_actual, loc=(px, py, WALL))
-        L.make_cylinder(phole, POST_HOLE / 2, ph_actual + 0.1,
+        ph = f"post_h_{i}"
+        ceiling = angled_top_z(py)
+        post_h = max(ceiling - WALL - WALL - 1, 5)
+        L.make_cylinder(po, POST_OD / 2, post_h, loc=(px, py, WALL))
+        L.make_cylinder(ph, POST_HOLE / 2, post_h + 0.1,
                         loc=(px, py, WALL - 0.05))
-        L.boolean(po, phole)
+        L.boolean(po, ph)
         additions.append(po)
 
     if additions:
@@ -213,7 +197,28 @@ bbox = [
 stl_path = os.path.join(LIB, "base-desktop-wedge.stl")
 L.export_stl(name, stl_path)
 png_path = os.path.join(LIB, "base-desktop-wedge.png")
-R.render_part(name, color=(0.30, 0.30, 0.35), out_path=png_path)
+R.render_part(name, color=(0.30, 0.30, 0.35), out_path=png_path, cam_z_mul=2.5)
+
+# Top-down verification render to confirm both buttons + display visible
+import bpy as _bpy
+_bpy.ops.object.select_all(action='DESELECT')
+o2 = _bpy.data.objects[name]
+o2.select_set(True)
+_bpy.context.view_layer.objects.active = o2
+# Add a top-down camera, render
+for cam_obj in [c for c in _bpy.data.objects if c.type == 'CAMERA']:
+    _bpy.data.objects.remove(cam_obj, do_unlink=True)
+_bpy.ops.object.camera_add(location=(W / 2, D / 2, 250))
+top_cam = _bpy.context.active_object
+top_cam.rotation_mode = 'XYZ'
+top_cam.rotation_euler = (0, 0, 0)
+top_cam.data.lens = 50
+_bpy.context.scene.camera = top_cam
+top_png = os.path.join(LIB, "base-desktop-wedge-topdown.png")
+_bpy.context.scene.render.filepath = top_png
+_bpy.context.scene.render.resolution_x = 1024
+_bpy.context.scene.render.resolution_y = 800
+_bpy.ops.render.render(write_still=True)
 
 result = {
     "name": name,
@@ -222,4 +227,5 @@ result = {
     "bbox": bbox,
     "stl_kb": round(os.path.getsize(stl_path) / 1024, 1),
     "png_kb": round(os.path.getsize(png_path) / 1024, 1),
+    "topdown_png_kb": round(os.path.getsize(top_png) / 1024, 1),
 }

@@ -16,7 +16,7 @@ import build_lib as L
 import render_helper as R
 import bpy
 
-W = 130
+W = 140        # match new wedge footprint (was 130 in v4)
 D = 110
 WALL = 2.5
 LID_THICK = 3
